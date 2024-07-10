@@ -86,6 +86,7 @@ export interface Theme {
     horizontalBorderColor?: string;
     headerBottomBorderColor?: string;
     roundingRadius?: number;
+    rowMarkerIcon?: string;
 }
 
 const dataEditorBaseTheme: Theme = {
