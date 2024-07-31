@@ -237,6 +237,14 @@ export interface DataEditorProps extends Props, Pick<DataGridSearchProps, "image
      * @group Events
      */
     readonly onCellActivated?: (cell: Item) => void;
+    /** Emitted when the grid is focused.
+     * @group Events
+     */
+    readonly onGridFocused?: () => void;
+    /** Emitted when the grid is blurred.
+     * @group Events
+     */
+    readonly onGridBlurred?: () => void;
 
     /**
      * Emitted whenever the user initiats a pattern fill using the fill handle. This event provides both
@@ -765,6 +773,8 @@ const DataEditorImpl: React.ForwardRefRenderFunction<DataEditorRef, DataEditorPr
         getCellContent,
         onCellClicked,
         onCellActivated,
+        onGridFocused,
+        onGridBlurred,
         onFillPattern,
         onFinishedEditing,
         coercePasteValue,
@@ -3948,6 +3958,7 @@ const DataEditorImpl: React.ForwardRefRenderFunction<DataEditorRef, DataEditorPr
 
     const onCanvasFocused = React.useCallback(() => {
         setIsFocusedDebounced.current(true);
+        onGridFocused?.();
 
         // check for mouse state, don't do anything if the user is clicked to focus.
         if (
@@ -3975,7 +3986,8 @@ const DataEditorImpl: React.ForwardRefRenderFunction<DataEditorRef, DataEditorPr
 
     const onFocusOut = React.useCallback(() => {
         setIsFocusedDebounced.current(false);
-    }, []);
+        onGridBlurred?.();
+    }, [onGridBlurred]);
 
     const [idealWidth, idealHeight] = React.useMemo(() => {
         let h: number;
