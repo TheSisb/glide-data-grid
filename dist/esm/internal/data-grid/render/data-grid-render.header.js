@@ -223,9 +223,9 @@ export function computeHeaderLayout(ctx, c, x, y, width, height, theme, isRTL) {
         ? getMeasuredTextCache(c.title, theme.headerFontFull)?.width ?? 0
         : measureTextCached(c.title, ctx, theme.headerFontFull).width;
     const textBounds = {
-        x: isRightAligned ? x + xPad : drawX,
+        x: isRightAligned ? x : drawX,
         y,
-        width: isRightAligned ? width - (hasIcon ? headerIconSize + xPad * 2 : xPad) : width - drawX - xPad,
+        width: isRightAligned ? width - (hasIcon ? headerIconSize + xPad : xPad) : width - (drawX - x) - xPad,
         height,
     };
     let indicatorIconBounds;
@@ -296,7 +296,7 @@ function drawHeaderInner(ctx, x, y, width, height, c, selected, theme, isHovered
         const isRightAligned = isRtl || c.contentAlign === "right";
         ctx.textAlign = isRightAligned ? "right" : "left";
         const textX = isRightAligned
-            ? headerLayout.textBounds.x + headerLayout.textBounds.width - theme.cellHorizontalPadding
+            ? headerLayout.textBounds.x + headerLayout.textBounds.width
             : headerLayout.textBounds.x;
         ctx.fillText(c.title, textX, y + height / 2 + getMiddleCenterBias(ctx, theme.headerFontFull));
     }

@@ -36,7 +36,7 @@ interface AddColumnsProps {
 
 export const AddColumns: React.FC<AddColumnsProps> = p => {
     const { cols, getCellContent } = useMockDataGenerator(p.columnsCount);
-    const newCols = cols.map(c => ({ ...c, contentAlign: "right" }));
+    const newCols = cols.map(c => ({ ...c, contentAlign: "right", icon: null }));
 
     return (
         <DataEditor
