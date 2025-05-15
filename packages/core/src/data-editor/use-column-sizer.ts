@@ -2,7 +2,6 @@ import * as React from "react";
 import type { FullTheme } from "../common/styles.js";
 import type { DataGridSearchProps } from "../internal/data-grid-search/data-grid-search.js";
 import type { GetCellRendererCallback } from "../cells/cell-types.js";
-
 import {
     type CellArray,
     type GridCell,
@@ -13,6 +12,8 @@ import {
     type SizedGridColumn,
 } from "../internal/data-grid/data-grid-types.js";
 const defaultSize = 150;
+// 15x more than the default size (of 10)
+const DEFAULT_COMPUTE_ROWS = 150;
 
 function measureCell(
     ctx: CanvasRenderingContext2D,
@@ -32,45 +33,24 @@ export function measureColumn(
     selectedData: CellArray,
     minColumnWidth: number,
     maxColumnWidth: number,
-    removeOutliers: boolean,
     getCellRenderer: GetCellRendererCallback
 ): SizedGridColumn {
     let max = 0;
-    const sizes: number[] =
-        selectedData === undefined
-            ? []
-            : selectedData.map(row => {
-                  const r = measureCell(ctx, row[colIndex], theme, getCellRenderer);
-                  max = Math.max(max, r);
-                  return r;
-              });
 
-    if (sizes.length > 5 && removeOutliers) {
-        max = 0;
-        // Filter out outliers
-        let sum = 0;
-        for (const size of sizes) {
-            sum += size;
-        }
-        const average = sum / sizes.length;
-        // Set sizes that are considered outliers to zero
-        for (let i = 0; i < sizes.length; i++) {
-            if (sizes[i] >= average * 2) {
-                sizes[i] = 0;
-            } else {
-                max = Math.max(max, sizes[i]);
-            }
-        }
+    // Check rows width
+    for (const row of selectedData) {
+        max = Math.max(max, measureCell(ctx, row[colIndex], theme, getCellRenderer));
     }
+
+    // Check title width
     max = Math.max(
         max,
         ctx.measureText(c?.title ?? "#").width + theme.cellHorizontalPadding * 2 + (c?.icon === undefined ? 0 : 28)
     );
-    const final = Math.max(Math.ceil(minColumnWidth), Math.min(Math.floor(maxColumnWidth), Math.ceil(max)));
 
     return {
         ...c,
-        width: final,
+        width: Math.max(Math.ceil(minColumnWidth), Math.min(Math.floor(maxColumnWidth), Math.ceil(max))),
     };
 }
 
@@ -120,7 +100,7 @@ export function useColumnSizer(
     React.useLayoutEffect(() => {
         const getCells = getCellsForSelectionRef.current;
         if (getCells === undefined || columns.every(isSizedGridColumn)) return;
-        let computeRows = Math.max(1, 10 - Math.floor(columns.length / 10_000));
+        let computeRows = Math.max(1, DEFAULT_COMPUTE_ROWS - Math.floor(columns.length / 10));
         let tailRows = 0;
         if (computeRows < rowsRef.current && computeRows > 1) {
             computeRows--;
@@ -208,7 +188,6 @@ export function useColumnSizer(
                     selectedData,
                     minColumnWidth,
                     maxColumnWidth,
-                    true,
                     getCellRenderer
                 );
                 memoMap.current[c.id] = r.width;
