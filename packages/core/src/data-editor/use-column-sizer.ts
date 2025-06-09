@@ -2,6 +2,7 @@ import * as React from "react";
 import type { FullTheme } from "../common/styles.js";
 import type { DataGridSearchProps } from "../internal/data-grid-search/data-grid-search.js";
 import type { GetCellRendererCallback } from "../cells/cell-types.js";
+import { measureTextCached } from "../internal/data-grid/render/data-grid-lib.js";
 import {
     type CellArray,
     type GridCell,
@@ -42,11 +43,13 @@ export function measureColumn(
         max = Math.max(max, measureCell(ctx, row[colIndex], theme, getCellRenderer));
     }
 
-    // Check title width
-    max = Math.max(
-        max,
-        ctx.measureText(c?.title ?? "#").width + theme.cellHorizontalPadding * 2 + (c?.icon === undefined ? 0 : 28)
-    );
+    // Check title width - using enhanced measureTextCached for cross-browser accuracy
+    const titleWidth =
+        measureTextCached(c?.title ?? "#", ctx, theme.headerFontFull).width +
+        theme.cellHorizontalPadding * 2 +
+        (c?.icon === undefined ? 0 : 28);
+
+    max = Math.max(max, titleWidth);
 
     return {
         ...c,

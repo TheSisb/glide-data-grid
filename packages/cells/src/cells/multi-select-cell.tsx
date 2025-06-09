@@ -456,7 +456,10 @@ const renderer: CustomRenderer<MultiSelectCell> = {
         );
 
         return (
-            labels.reduce((acc, data) => ctx.measureText(data).width + acc + BUBBLE_PADDING * 2 + BUBBLE_MARGIN, 0) +
+            labels.reduce(
+                (acc, data) => measureTextCached(data, ctx).width + acc + BUBBLE_PADDING * 2 + BUBBLE_MARGIN,
+                0
+            ) +
             2 * t.cellHorizontalPadding -
             4
         );

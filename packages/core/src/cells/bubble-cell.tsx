@@ -13,7 +13,9 @@ export const bubbleCellRenderer: InternalCellRenderer<BubbleCell> = {
     useLabel: false,
     needsHoverPosition: false,
     measure: (ctx, cell, t) =>
-        cell.data.reduce((acc, data) => ctx.measureText(data).width + acc + 20, 0) + 2 * t.cellHorizontalPadding - 4,
+        cell.data.reduce((acc, data) => measureTextCached(data, ctx, t.baseFontFull).width + acc + 20, 0) +
+        2 * t.cellHorizontalPadding -
+        4,
     draw: a => drawBubbles(a, a.cell.data),
     provideEditor: () => p => {
         const { value } = p;
