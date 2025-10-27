@@ -11,6 +11,7 @@ interface Props {
     readonly allowNegative?: boolean;
     readonly thousandSeparator?: boolean | string;
     readonly decimalSeparator?: string;
+    readonly initialValue?: string;
 }
 declare const NumberOverlayEditor: React.FunctionComponent<Props>;
 export default NumberOverlayEditor;

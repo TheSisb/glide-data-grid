@@ -25,9 +25,9 @@ export const numberCellRenderer = {
         data: undefined,
     }),
     provideEditor: () => p => {
-        const { isHighlighted, onChange, value, validatedSelection } = p;
+        const { isHighlighted, onChange, value, validatedSelection, initialValue } = p;
         return (React.createElement(React.Suspense, { fallback: null },
-            React.createElement(NumberOverlayEditor, { highlight: isHighlighted, disabled: value.readonly === true, value: value.data, fixedDecimals: value.fixedDecimals, allowNegative: value.allowNegative, thousandSeparator: value.thousandSeparator, decimalSeparator: value.decimalSeparator, validatedSelection: validatedSelection, onChange: x => onChange({
+            React.createElement(NumberOverlayEditor, { highlight: isHighlighted, disabled: value.readonly === true, value: value.data, fixedDecimals: value.fixedDecimals, allowNegative: value.allowNegative, thousandSeparator: value.thousandSeparator, decimalSeparator: value.decimalSeparator, initialValue: initialValue, validatedSelection: validatedSelection, onChange: x => onChange({
                     ...value,
                     data: Number.isNaN(x.floatValue ?? 0) ? 0 : x.floatValue,
                 }) })));
