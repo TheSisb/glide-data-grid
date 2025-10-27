@@ -11,3 +11,4 @@ export default class MarkdownDiv<TProps extends MarkdownDivProps, TState> extend
     private containerRefHook;
     render(): React.JSX.Element;
 }
+//# sourceMappingURL=markdown-div.d.ts.map
