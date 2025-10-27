@@ -32,7 +32,7 @@ export const numberCellRenderer: InternalCellRenderer<NumberCell> = {
         data: undefined,
     }),
     provideEditor: () => p => {
-        const { isHighlighted, onChange, value, validatedSelection } = p;
+        const { isHighlighted, onChange, value, validatedSelection, initialValue } = p;
         return (
             <React.Suspense fallback={null}>
                 <NumberOverlayEditor
@@ -43,6 +43,7 @@ export const numberCellRenderer: InternalCellRenderer<NumberCell> = {
                     allowNegative={value.allowNegative}
                     thousandSeparator={value.thousandSeparator}
                     decimalSeparator={value.decimalSeparator}
+                    initialValue={initialValue}
                     validatedSelection={validatedSelection}
                     onChange={x =>
                         onChange({
