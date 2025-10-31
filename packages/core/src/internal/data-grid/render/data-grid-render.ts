@@ -621,44 +621,6 @@ export function drawGrid(arg: DrawGridArg, lastArg: DrawGridArg | undefined) {
         targetCtx.fillRect(0, 0, width, height);
     }
 
-    const spans = drawCells(
-        targetCtx,
-        effectiveCols,
-        mappedColumns,
-        height,
-        totalHeaderHeight,
-        translateX,
-        translateY,
-        cellYOffset,
-        rows,
-        getRowHeight,
-        getCellContent,
-        getGroupDetails,
-        getRowThemeOverride,
-        disabledRows,
-        isFocused,
-        drawFocus,
-        freezeTrailingRows,
-        hasAppendRow,
-        drawRegions,
-        damage,
-        selection,
-        prelightCells,
-        highlightRegions,
-        imageLoader,
-        spriteManager,
-        hoverValues,
-        hoverInfo,
-        drawCellCallback,
-        hyperWrapping,
-        theme,
-        enqueue,
-        renderStateProvider,
-        getCellRenderer,
-        overrideCursor,
-        minimumCellWidth
-    );
-
     drawBlanks(
         targetCtx,
         effectiveCols,
@@ -697,6 +659,44 @@ export function drawGrid(arg: DrawGridArg, lastArg: DrawGridArg | undefined) {
         freezeTrailingRows,
         rows,
         theme
+    );
+
+    const spans = drawCells(
+        targetCtx,
+        effectiveCols,
+        mappedColumns,
+        height,
+        totalHeaderHeight,
+        translateX,
+        translateY,
+        cellYOffset,
+        rows,
+        getRowHeight,
+        getCellContent,
+        getGroupDetails,
+        getRowThemeOverride,
+        disabledRows,
+        isFocused,
+        drawFocus,
+        freezeTrailingRows,
+        hasAppendRow,
+        drawRegions,
+        damage,
+        selection,
+        prelightCells,
+        highlightRegions,
+        imageLoader,
+        spriteManager,
+        hoverValues,
+        hoverInfo,
+        drawCellCallback,
+        hyperWrapping,
+        theme,
+        enqueue,
+        renderStateProvider,
+        getCellRenderer,
+        overrideCursor,
+        minimumCellWidth
     );
 
     drawGridLines(
