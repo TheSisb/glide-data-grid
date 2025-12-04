@@ -72,6 +72,7 @@ const getLongCellsForSelection = vi.fn(
 const theme = getDataEditorTheme();
 
 const abortController = new AbortController();
+const DEFAULT_TEST_COMPUTE_ROWS = 150; // Keep in sync with DEFAULT_COMPUTE_ROWS
 
 const SINGLE_COLUMN = [
     {
@@ -185,13 +186,15 @@ describe("use-column-sizer", () => {
                 400,
                 20,
                 500,
-                mergeAndRealizeTheme(theme, {cellHorizontalPadding: 12}),
+                mergeAndRealizeTheme(theme, { cellHorizontalPadding: 12 }),
                 getCellRenderer,
                 abortController
             )
         );
 
-        const columnA = result.current.sizedColumns.find(col => col.title === "Some very very long title that exceeds displayData width");
+        const columnA = result.current.sizedColumns.find(
+            col => col.title === "Some very very long title that exceeds displayData width"
+        );
         const columnB = result.current.sizedColumns.find(col => col.title === "Short title");
 
         expect(columnA).toBeDefined();
@@ -220,13 +223,20 @@ describe("use-column-sizer", () => {
         );
 
         expect(getShortCellsForSelection).toBeCalledTimes(2);
+        const expectedHeight = (() => {
+            let computeRows = Math.max(1, DEFAULT_TEST_COMPUTE_ROWS - Math.floor(COLUMNS.length / 10));
+            if (computeRows < 1000 && computeRows > 1) {
+                computeRows--;
+            }
+            return Math.min(1000, computeRows);
+        })();
         expect(getShortCellsForSelection).toHaveBeenNthCalledWith(
             1,
             {
                 x: 0,
                 y: 0,
                 width: 2,
-                height: 9,
+                height: expectedHeight,
             },
             expect.anything()
         );
@@ -293,6 +303,40 @@ describe("use-column-sizer", () => {
         expect(longColumnA?.width).toBe(32);
         expect(longColumnB?.width).toBe(160);
         expect(longColumnC?.width).toBe(66);
+    });
+
+    it("Re-measures existing columns when their definitions change", async () => {
+        const { result, rerender } = renderHook(
+            ({ getCellsForSelection, columns }) =>
+                useColumnSizer(
+                    columns,
+                    1000,
+                    getCellsForSelection,
+                    400,
+                    20,
+                    500,
+                    mergeAndRealizeTheme(theme),
+                    getCellRenderer,
+                    abortController
+                ),
+            {
+                initialProps: {
+                    getCellsForSelection: getShortCellsForSelection,
+                    columns: COLUMNS,
+                },
+            }
+        );
+
+        const shortColumnA = result.current.sizedColumns.find(col => col.title === "A");
+        expect(shortColumnA?.width).toBe(32);
+
+        rerender({
+            getCellsForSelection: getLongCellsForSelection,
+            columns: COLUMNS.map(column => ({ ...column })),
+        });
+
+        const longColumnA = result.current.sizedColumns.find(col => col.title === "A");
+        expect(longColumnA?.width).toBe(66);
     });
 
     it("Returns the default sizes if getCellsForSelection is not provided", async () => {
