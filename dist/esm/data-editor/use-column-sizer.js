@@ -49,6 +49,7 @@ export function useColumnSizer(columns, rows, getCellsForSelection, clientWidth,
         };
     }, [canvas]);
     const memoMap = React.useRef({});
+    const previousColumnsByIdRef = React.useRef(new Map());
     const lastColumns = React.useRef();
     const [selectedData, setSelectionData] = React.useState();
     React.useLayoutEffect(() => {
@@ -97,7 +98,21 @@ export function useColumnSizer(columns, rows, getCellsForSelection, clientWidth,
             setSelectionData(toSet);
         };
         void fn();
-    }, [abortController.signal, columns]);
+    }, [abortController.signal, columns, rows]);
+    const previousColumnsById = previousColumnsByIdRef.current;
+    const nextColumnsById = new Map();
+    for (const column of columns) {
+        const id = column.id;
+        if (id === undefined)
+            continue;
+        nextColumnsById.set(id, column);
+    }
+    for (const [id] of previousColumnsById) {
+        if (!nextColumnsById.has(id)) {
+            delete memoMap.current[id];
+        }
+    }
+    previousColumnsByIdRef.current = nextColumnsById;
     return React.useMemo(() => {
         const getRaw = () => {
             if (columns.every(isSizedGridColumn)) {
@@ -117,20 +132,20 @@ export function useColumnSizer(columns, rows, getCellsForSelection, clientWidth,
             return columns.map((c, colIndex) => {
                 if (isSizedGridColumn(c))
                     return c;
-                if (memoMap.current[c.id] !== undefined) {
+                if (memoMap.current[c.id] !== undefined && memoMap.current[c.id].column === c) {
                     return {
                         ...c,
-                        width: memoMap.current[c.id],
+                        width: memoMap.current[c.id].width,
                     };
                 }
                 if (selectedData === undefined || lastColumns.current !== columns || c.id === undefined) {
                     return {
                         ...c,
-                        width: defaultSize,
+                        width: memoMap.current[c.id]?.width ?? defaultSize,
                     };
                 }
                 const r = measureColumn(ctx, theme, c, colIndex, selectedData, minColumnWidth, maxColumnWidth, getCellRenderer);
-                memoMap.current[c.id] = r.width;
+                memoMap.current[c.id] = { width: r.width, column: c };
                 return r;
             });
         };
