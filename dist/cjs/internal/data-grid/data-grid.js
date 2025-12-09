@@ -106,11 +106,7 @@ const DataGrid = (p, forwardedRef) => {
         const effectiveCols = getEffectiveColumns(mappedColumns, cellXOffset, width, undefined, translateX);
         let button = 0;
         let buttons = 0;
-        const isMouse = (typeof PointerEvent !== "undefined" && ev instanceof PointerEvent && ev.pointerType === "mouse") ||
-            (typeof MouseEvent !== "undefined" && ev instanceof MouseEvent);
-        const isTouch = (typeof PointerEvent !== "undefined" && ev instanceof PointerEvent && ev.pointerType === "touch") ||
-            (typeof TouchEvent !== "undefined" && ev instanceof TouchEvent);
-        if (isMouse) {
+        if (ev instanceof MouseEvent) {
             button = ev.button;
             buttons = ev.buttons;
         }
@@ -122,6 +118,7 @@ const DataGrid = (p, forwardedRef) => {
         const shiftKey = ev?.shiftKey === true;
         const ctrlKey = ev?.ctrlKey === true;
         const metaKey = ev?.metaKey === true;
+        const isTouch = (ev !== undefined && !(ev instanceof MouseEvent)) || ev?.pointerType === "touch";
         const scrollEdge = [
             x < 0 ? -1 : width < x ? 1 : 0,
             y < totalHeaderHeight ? -1 : height < y ? 1 : 0,
@@ -557,14 +554,22 @@ const DataGrid = (p, forwardedRef) => {
     const downTime = React.useRef(0);
     const downPosition = React.useRef();
     const mouseDown = React.useRef(false);
-    const onPointerDown = React.useCallback((ev) => {
+    const onMouseDownImpl = React.useCallback((ev) => {
         const canvas = ref.current;
         const eventTarget = eventTargetRef?.current;
         if (canvas === null || (ev.target !== canvas && ev.target !== eventTarget))
             return;
         mouseDown.current = true;
-        const clientX = ev.clientX;
-        const clientY = ev.clientY;
+        let clientX;
+        let clientY;
+        if (ev instanceof MouseEvent) {
+            clientX = ev.clientX;
+            clientY = ev.clientY;
+        }
+        else {
+            clientX = ev.touches[0].clientX;
+            clientY = ev.touches[0].clientY;
+        }
         if (ev.target === eventTarget && eventTarget !== null) {
             const bounds = eventTarget.getBoundingClientRect();
             if (clientX > bounds.right || clientY > bounds.bottom)
@@ -605,9 +610,10 @@ const DataGrid = (p, forwardedRef) => {
         isOverHeaderElement,
         onMouseDown,
     ]);
-    useEventListener("pointerdown", onPointerDown, windowEventTarget, false);
+    useEventListener("touchstart", onMouseDownImpl, windowEventTarget, false);
+    useEventListener("mousedown", onMouseDownImpl, windowEventTarget, false);
     const lastUpTime = React.useRef(0);
-    const onPointerUp = React.useCallback((ev) => {
+    const onMouseUpImpl = React.useCallback((ev) => {
         const lastUpTimeValue = lastUpTime.current;
         lastUpTime.current = Date.now();
         const canvas = ref.current;
@@ -616,9 +622,21 @@ const DataGrid = (p, forwardedRef) => {
             return;
         const eventTarget = eventTargetRef?.current;
         const isOutside = ev.target !== canvas && ev.target !== eventTarget;
-        const clientX = ev.clientX;
-        const clientY = ev.clientY;
-        const canCancel = ev.pointerType === "mouse" ? ev.button < 3 : true;
+        let clientX;
+        let clientY;
+        let canCancel = true;
+        if (ev instanceof MouseEvent) {
+            clientX = ev.clientX;
+            clientY = ev.clientY;
+            canCancel = ev.button < 3;
+            if (ev.pointerType === "touch") {
+                return;
+            }
+        }
+        else {
+            clientX = ev.changedTouches[0].clientX;
+            clientY = ev.changedTouches[0].clientY;
+        }
         let args = getMouseArgsForPosition(canvas, clientX, clientY, ev);
         if (args.isTouch && downTime.current !== 0 && Date.now() - downTime.current > 500) {
             args = {
@@ -658,7 +676,8 @@ const DataGrid = (p, forwardedRef) => {
         }
         onMouseUp(args, isOutside);
     }, [onMouseUp, eventTargetRef, getMouseArgsForPosition, isOverHeaderElement, groupHeaderActionForEvent]);
-    useEventListener("pointerup", onPointerUp, windowEventTarget, false);
+    useEventListener("mouseup", onMouseUpImpl, windowEventTarget, false);
+    useEventListener("touchend", onMouseUpImpl, windowEventTarget, false);
     const onClickImpl = React.useCallback((ev) => {
         const canvas = ref.current;
         if (canvas === null)
@@ -735,7 +754,7 @@ const DataGrid = (p, forwardedRef) => {
         am.setHovered(cellNeedsHover ? hoveredItem : undefined);
     }, [getCellContent, getCellRenderer, hoveredItem]);
     const hoveredRef = React.useRef();
-    const onPointerMove = React.useCallback((ev) => {
+    const onMouseMoveImpl = React.useCallback((ev) => {
         const canvas = ref.current;
         if (canvas === null)
             return;
@@ -805,7 +824,7 @@ const DataGrid = (p, forwardedRef) => {
         getCellRenderer,
         damageInternal,
     ]);
-    useEventListener("pointermove", onPointerMove, windowEventTarget, true);
+    useEventListener("mousemove", onMouseMoveImpl, windowEventTarget, true);
     const onKeyDownImpl = React.useCallback((event) => {
         const canvas = ref.current;
         if (canvas === null)
