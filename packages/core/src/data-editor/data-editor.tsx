@@ -1340,7 +1340,7 @@ const DataEditorImpl: React.ForwardRefRenderFunction<DataEditorRef, DataEditorPr
                 //If the grid is empty, we will return text
                 const isFirst = col === rowMarkerOffset;
 
-                const maybeFirstColumnHint = isFirst ? trailingRowOptions?.hint ?? "" : "";
+                const maybeFirstColumnHint = isFirst ? (trailingRowOptions?.hint ?? "") : "";
                 const c = mangledColsRef.current[col];
 
                 if (c?.trailingRowOptions?.disabled === true) {
@@ -2437,7 +2437,7 @@ const DataEditorImpl: React.ForwardRefRenderFunction<DataEditorRef, DataEditorPr
                         const act =
                             a.isDoubleClick === true
                                 ? "double-click"
-                                : c.activationBehaviorOverride ?? cellActivationBehavior;
+                                : (c.activationBehaviorOverride ?? cellActivationBehavior);
                         const activationEvent: CellActivatedEventArgs = {
                             inputType: "pointer",
                             pointerActivation: act,
@@ -2503,7 +2503,11 @@ const DataEditorImpl: React.ForwardRefRenderFunction<DataEditorRef, DataEditorPr
                     if (args.isDoubleClick === true) {
                         void normalSizeColumn(col);
                     }
-                } else if (args.button === 0 && col === lastMouseDownCol && row === lastMouseDownRow) {
+                } else if (
+                    (args.button === 0 || args.button === 1) &&
+                    col === lastMouseDownCol &&
+                    row === lastMouseDownRow
+                ) {
                     onHeaderClicked?.(clickLocation, { ...args, preventDefault });
                 }
             }
@@ -3602,7 +3606,7 @@ const DataEditorImpl: React.ForwardRefRenderFunction<DataEditorRef, DataEditorPr
                 formatted?: string | string[]
             ): EditListItem | undefined {
                 const stringifiedRawValue =
-                    typeof rawValue === "object" ? rawValue?.join("\n") ?? "" : rawValue?.toString() ?? "";
+                    typeof rawValue === "object" ? (rawValue?.join("\n") ?? "") : (rawValue?.toString() ?? "");
 
                 if (!isInnerOnlyCell(inner) && isReadWriteCell(inner) && inner.readonly !== true) {
                     const coerced = coercePasteValue?.(stringifiedRawValue, inner);
@@ -3980,7 +3984,7 @@ const DataEditorImpl: React.ForwardRefRenderFunction<DataEditorRef, DataEditorPr
         (col: number) => {
             return typeof verticalBorder === "boolean"
                 ? verticalBorder
-                : verticalBorder?.(col - rowMarkerOffset) ?? true;
+                : (verticalBorder?.(col - rowMarkerOffset) ?? true);
         },
         [rowMarkerOffset, verticalBorder]
     );

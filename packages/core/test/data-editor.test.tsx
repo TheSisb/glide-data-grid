@@ -921,6 +921,27 @@ describe("data-editor", () => {
         expect(spy).toHaveBeenCalledWith(1, expect.anything());
     });
 
+    test("Emits header click on middle click", async () => {
+        const spy = vi.fn();
+
+        vi.useFakeTimers();
+        render(<DataEditor {...basicProps} onHeaderClicked={spy} />, {
+            wrapper: Context,
+        });
+        prep();
+
+        const canvas = screen.getByTestId("data-grid-canvas");
+        sendClick(canvas, {
+            clientX: 300, // Col B
+            clientY: 16, // Header
+            button: 1, // Middle click
+        });
+
+        expect(spy).toHaveBeenCalled();
+        expect(spy).toHaveBeenCalledWith(1, expect.anything());
+        expect(spy.mock.calls[0][1].button).toBe(1);
+    });
+
     test("Does emit header click on row marker column", async () => {
         const spy = vi.fn();
 

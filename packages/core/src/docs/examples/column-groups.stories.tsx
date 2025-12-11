@@ -39,6 +39,8 @@ export const ColumnGroups: React.VFC = () => {
             {...defaultProps}
             getCellContent={getCellContent}
             onGroupHeaderRenamed={(x, y) => window.alert(`Please rename group ${x} to ${y}`)}
+            onHeaderClicked={(x, y) => console.log("header clicked", x, y)}
+            onGroupHeaderClicked={(x, y) => console.log("group header clicked", x, y)}
             columns={cols}
             rows={1000}
             getGroupDetails={g => ({
