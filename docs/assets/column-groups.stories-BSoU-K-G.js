@@ -1,0 +1,10 @@
+import{R as o}from"./iframe-BZCng1zM.js";import{D as d}from"./data-editor-all-xeAGtjLc.js";import{B as c,D as m,P as u,u as p,d as g}from"./utils-D84F9GRH.js";import{a as C}from"./image-window-loader-B9DdfDvN.js";import{S as G}from"./story-utils-D79GruVe.js";import"./preload-helper-C1FmrZbK.js";import"./throttle-CvI-UzeK.js";import"./flatten-Cl4QnF6X.js";import"./scrolling-data-grid-COSqQGvX.js";import"./marked.esm-DICA0ayZ.js";import"./index-D_kXk1yT.js";import"./throttle--dN168Gr.js";const R={title:"Glide-Data-Grid/DataEditor Demos",decorators:[a=>o.createElement(G,null,o.createElement(c,{title:"Column Grouping",description:o.createElement(m,null,"Columns in the data grid may be grouped by setting their ",o.createElement(u,null,"group")," ","property.")},o.createElement(a,null)))]},t=()=>{const{cols:a,getCellContent:i}=p(20,!0,!0);return o.createElement(d,{...g,getCellContent:i,onGroupHeaderRenamed:(e,r)=>window.alert(`Please rename group ${e} to ${r}`),onHeaderClicked:(e,r)=>console.log("header clicked",e,r),onGroupHeaderClicked:(e,r)=>console.log("group header clicked",e,r),columns:a,rows:1e3,getGroupDetails:e=>({name:e,icon:e===""?void 0:C.HeaderCode}),rowMarkers:"both"})};var n,l,s;t.parameters={...t.parameters,docs:{...(n=t.parameters)==null?void 0:n.docs,source:{originalSource:`() => {
+  const {
+    cols,
+    getCellContent
+  } = useMockDataGenerator(20, true, true);
+  return <DataEditor {...defaultProps} getCellContent={getCellContent} onGroupHeaderRenamed={(x, y) => window.alert(\`Please rename group \${x} to \${y}\`)} onHeaderClicked={(x, y) => console.log("header clicked", x, y)} onGroupHeaderClicked={(x, y) => console.log("group header clicked", x, y)} columns={cols} rows={1000} getGroupDetails={g => ({
+    name: g,
+    icon: g === "" ? undefined : GridColumnIcon.HeaderCode
+  })} rowMarkers="both" />;
+}`,...(s=(l=t.parameters)==null?void 0:l.docs)==null?void 0:s.source}}};const $=["ColumnGroups"];export{t as ColumnGroups,$ as __namedExportsOrder,R as default};
