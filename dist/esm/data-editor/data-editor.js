@@ -365,7 +365,7 @@ const DataEditorImpl = (p, forwardedRef) => {
         else if (isTrailing) {
             //If the grid is empty, we will return text
             const isFirst = col === rowMarkerOffset;
-            const maybeFirstColumnHint = isFirst ? trailingRowOptions?.hint ?? "" : "";
+            const maybeFirstColumnHint = isFirst ? (trailingRowOptions?.hint ?? "") : "";
             const c = mangledColsRef.current[col];
             if (c?.trailingRowOptions?.disabled === true) {
                 return loadingCell;
@@ -1290,7 +1290,7 @@ const DataEditorImpl = (p, forwardedRef) => {
                 if (shouldActivate) {
                     const act = a.isDoubleClick === true
                         ? "double-click"
-                        : c.activationBehaviorOverride ?? cellActivationBehavior;
+                        : (c.activationBehaviorOverride ?? cellActivationBehavior);
                     const activationEvent = {
                         inputType: "pointer",
                         pointerActivation: act,
@@ -1358,7 +1358,9 @@ const DataEditorImpl = (p, forwardedRef) => {
                     void normalSizeColumn(col);
                 }
             }
-            else if (args.button === 0 && col === lastMouseDownCol && row === lastMouseDownRow) {
+            else if ((args.button === 0 || args.button === 1) &&
+                col === lastMouseDownCol &&
+                row === lastMouseDownRow) {
                 onHeaderClicked?.(clickLocation, { ...args, preventDefault });
             }
         }
@@ -2320,7 +2322,7 @@ const DataEditorImpl = (p, forwardedRef) => {
         if (!keybindings.paste)
             return;
         function pasteToCell(inner, target, rawValue, formatted) {
-            const stringifiedRawValue = typeof rawValue === "object" ? rawValue?.join("\n") ?? "" : rawValue?.toString() ?? "";
+            const stringifiedRawValue = typeof rawValue === "object" ? (rawValue?.join("\n") ?? "") : (rawValue?.toString() ?? "");
             if (!isInnerOnlyCell(inner) && isReadWriteCell(inner) && inner.readonly !== true) {
                 const coerced = coercePasteValue?.(stringifiedRawValue, inner);
                 if (coerced !== undefined && isEditableGridCell(coerced)) {
@@ -2649,7 +2651,7 @@ const DataEditorImpl = (p, forwardedRef) => {
     const mangledVerticalBorder = React.useCallback((col) => {
         return typeof verticalBorder === "boolean"
             ? verticalBorder
-            : verticalBorder?.(col - rowMarkerOffset) ?? true;
+            : (verticalBorder?.(col - rowMarkerOffset) ?? true);
     }, [rowMarkerOffset, verticalBorder]);
     const renameGroupNode = React.useMemo(() => {
         if (renameGroup === undefined || canvasRef.current === null)
