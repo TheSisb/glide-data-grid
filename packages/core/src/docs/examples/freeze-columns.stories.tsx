@@ -31,7 +31,7 @@ export default {
 };
 
 export const FreezeColumns: React.VFC<any> = (p: { freezeColumns: number }) => {
-    const { cols, getCellContent } = useMockDataGenerator(100);
+    const { cols, getCellContent, setCellValue } = useMockDataGenerator(100, false);
 
     return (
         <DataEditor
@@ -39,6 +39,7 @@ export const FreezeColumns: React.VFC<any> = (p: { freezeColumns: number }) => {
             rowMarkers="both"
             freezeColumns={p.freezeColumns}
             getCellContent={getCellContent}
+            onCellEdited={setCellValue}
             columns={cols}
             verticalBorder={false}
             rows={1000}
