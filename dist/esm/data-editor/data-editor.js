@@ -2264,8 +2264,11 @@ const DataEditorImpl = (p, forwardedRef) => {
             /[\p{L}\p{M}\p{N}\p{S}\p{P}]/u.test(event.key) &&
             event.bounds !== undefined &&
             isReadWriteCell(getCellContent([col - rowMarkerOffset, Math.max(0, Math.min(row, rows - 1))]))) {
+            const isFrozenColumn = col < freezeColumns + rowMarkerOffset;
             if ((!showTrailingBlankRow || row !== rows) &&
-                (vr.y > row || row > vr.y + vr.height || vr.x > col || col > vr.x + vr.width)) {
+                (vr.y > row ||
+                    row > vr.y + vr.height ||
+                    (!isFrozenColumn && (vr.x > col || col > vr.x + vr.width)))) {
                 return;
             }
             const activationEvent = {
@@ -2284,6 +2287,7 @@ const DataEditorImpl = (p, forwardedRef) => {
         gridSelection,
         getCellContent,
         rowMarkerOffset,
+        freezeColumns,
         rows,
         showTrailingBlankRow,
         onCellActivated,
