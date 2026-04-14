@@ -1,5 +1,6 @@
 export * from "./internal/data-grid/data-grid-types.js";
 export { ImageOverlayEditor } from "./internal/data-grid-overlay-editor/private/image-overlay-editor.js";
+export { preloadOverlayEditors } from "./internal/data-grid-overlay-editor/preload-overlay-editors.js";
 export { default as MarkdownDiv } from "./internal/markdown-div/markdown-div.js";
 export { GrowingEntry as TextCellEntry } from "./internal/growing-entry/growing-entry.js";
 export { parseToRgba, withAlpha, blend, interpolateColors, getLuminance } from "./internal/data-grid/color-parser.js";

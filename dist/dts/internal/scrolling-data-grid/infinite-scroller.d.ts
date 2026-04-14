@@ -35,3 +35,4 @@ interface Props {
  */
 export declare const InfiniteScroller: React.FC<Props>;
 export {};
+//# sourceMappingURL=infinite-scroller.d.ts.map

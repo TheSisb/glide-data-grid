@@ -29,6 +29,7 @@ import { useKeybindingsWithDefaults } from "./data-editor-keybindings.js";
 import { useRowGroupingInner } from "./row-grouping.js";
 import { useRowGrouping } from "./row-grouping-api.js";
 import { useInitialScrollOffset } from "./use-initial-scroll-offset.js";
+import { preloadOverlayEditors } from "../internal/data-grid-overlay-editor/preload-overlay-editors.js";
 const DataGridOverlayEditor = React.lazy(async () => await import("../internal/data-grid-overlay-editor/data-grid-overlay-editor.js"));
 // There must be a better way
 let idCounter = 0;
@@ -272,6 +273,11 @@ const DataEditorImpl = (p, forwardedRef) => {
         }
         return r;
     }, [onCellEdited, onCellsEdited, rowMarkerOffset]);
+    React.useEffect(() => {
+        if (onCellEdited === undefined && onCellsEdited === undefined)
+            return;
+        preloadOverlayEditors();
+    }, [onCellEdited, onCellsEdited]);
     const [fillHighlightRegion, setFillHighlightRegion] = React.useState();
     // this will generally be undefined triggering the memo less often
     const highlightRange = gridSelection.current !== undefined &&
