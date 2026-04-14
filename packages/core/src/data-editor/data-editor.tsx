@@ -86,6 +86,7 @@ import { useRowGroupingInner, type RowGroupingOptions } from "./row-grouping.js"
 import { useRowGrouping } from "./row-grouping-api.js";
 import { useInitialScrollOffset } from "./use-initial-scroll-offset.js";
 import type { VisibleRegion } from "./visible-region.js";
+import { preloadOverlayEditors } from "../internal/data-grid-overlay-editor/preload-overlay-editors.js";
 
 const DataGridOverlayEditor = React.lazy(
     async () => await import("../internal/data-grid-overlay-editor/data-grid-overlay-editor.js")
@@ -1233,6 +1234,11 @@ const DataEditorImpl: React.ForwardRefRenderFunction<DataEditorRef, DataEditorPr
         },
         [onCellEdited, onCellsEdited, rowMarkerOffset]
     );
+
+    React.useEffect(() => {
+        if (onCellEdited === undefined && onCellsEdited === undefined) return;
+        preloadOverlayEditors();
+    }, [onCellEdited, onCellsEdited]);
 
     const [fillHighlightRegion, setFillHighlightRegion] = React.useState<Rectangle | undefined>();
 

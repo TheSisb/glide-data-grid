@@ -45,12 +45,13 @@ export const numberCellRenderer: InternalCellRenderer<NumberCell> = {
                     decimalSeparator={value.decimalSeparator}
                     initialValue={initialValue}
                     validatedSelection={validatedSelection}
-                    onChange={x =>
+                    onChange={x => {
+                        if (x.floatValue === undefined && initialValue !== undefined) return;
                         onChange({
                             ...value,
                             data: Number.isNaN(x.floatValue ?? 0) ? 0 : x.floatValue,
-                        })
-                    }
+                        });
+                    }}
                 />
             </React.Suspense>
         );
