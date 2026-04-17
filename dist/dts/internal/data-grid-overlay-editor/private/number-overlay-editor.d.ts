@@ -1,18 +1,12 @@
 import * as React from "react";
 import type { SelectionRange } from "../../data-grid/data-grid-types.js";
-import type { NumberFormatValues } from "react-number-format/types/types.js";
 interface Props {
     readonly value: number | undefined;
     readonly disabled?: boolean;
-    readonly onChange: (values: NumberFormatValues) => void;
+    readonly onChange: (value: number | undefined) => void;
     readonly highlight: boolean;
     readonly validatedSelection?: SelectionRange;
-    readonly fixedDecimals?: number;
-    readonly allowNegative?: boolean;
-    readonly thousandSeparator?: boolean | string;
-    readonly decimalSeparator?: string;
     readonly initialValue?: string;
 }
 declare const NumberOverlayEditor: React.FunctionComponent<Props>;
 export default NumberOverlayEditor;
-//# sourceMappingURL=number-overlay-editor.d.ts.map

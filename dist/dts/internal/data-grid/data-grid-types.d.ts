@@ -240,10 +240,6 @@ export interface NumberCell extends BaseGridCell {
     readonly displayData: string;
     readonly data: number | undefined;
     readonly readonly?: boolean;
-    readonly fixedDecimals?: number;
-    readonly allowNegative?: boolean;
-    readonly thousandSeparator?: boolean | string;
-    readonly decimalSeparator?: string;
     readonly hoverEffect?: boolean;
     readonly hoverEffectTheme?: HoverEffectTheme;
 }
@@ -427,4 +423,3 @@ export declare class CompactSelection {
     [Symbol.iterator](): Generator<number, void, unknown>;
 }
 export {};
-//# sourceMappingURL=data-grid-types.d.ts.map
