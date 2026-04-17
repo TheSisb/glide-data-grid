@@ -39,17 +39,12 @@ export const numberCellRenderer: InternalCellRenderer<NumberCell> = {
                     highlight={isHighlighted}
                     disabled={value.readonly === true}
                     value={value.data}
-                    fixedDecimals={value.fixedDecimals}
-                    allowNegative={value.allowNegative}
-                    thousandSeparator={value.thousandSeparator}
-                    decimalSeparator={value.decimalSeparator}
                     initialValue={initialValue}
                     validatedSelection={validatedSelection}
-                    onChange={x => {
-                        if (x.floatValue === undefined && initialValue !== undefined) return;
+                    onChange={newNum => {
                         onChange({
                             ...value,
-                            data: Number.isNaN(x.floatValue ?? 0) ? 0 : x.floatValue,
+                            data: newNum,
                         });
                     }}
                 />

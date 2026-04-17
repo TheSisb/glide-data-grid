@@ -1,50 +1,39 @@
 import * as React from "react";
 import { NumberOverlayEditorStyle } from "./number-overlay-editor-style.js";
-import { NumericFormat } from "react-number-format";
 import type { SelectionRange } from "../../data-grid/data-grid-types.js";
-import type { NumberFormatValues } from "react-number-format/types/types.js";
 
 interface Props {
     readonly value: number | undefined;
     readonly disabled?: boolean;
-    readonly onChange: (values: NumberFormatValues) => void;
+    readonly onChange: (value: number | undefined) => void;
     readonly highlight: boolean;
     readonly validatedSelection?: SelectionRange;
-    readonly fixedDecimals?: number;
-    readonly allowNegative?: boolean;
-    readonly thousandSeparator?: boolean | string;
-    readonly decimalSeparator?: string;
     readonly initialValue?: string;
 }
 
-function getDecimalSeparator() {
-    const numberWithDecimalSeparator = 1.1;
-    const result = Intl.NumberFormat()
-        ?.formatToParts(numberWithDecimalSeparator)
-        ?.find(part => part.type === "decimal")?.value;
-
-    return result ?? ".";
-}
-
-function getThousandSeprator() {
-    return getDecimalSeparator() === "." ? "," : ".";
-}
-
 const NumberOverlayEditor: React.FunctionComponent<Props> = p => {
-    const {
-        value,
-        onChange,
-        disabled,
-        highlight,
-        validatedSelection,
-        fixedDecimals,
-        allowNegative,
-        thousandSeparator,
-        decimalSeparator,
-        initialValue,
-    } = p;
+    const { value, onChange, disabled, highlight, validatedSelection, initialValue } = p;
 
-    const inputRef = React.useRef<HTMLInputElement>();
+    const [inputValue, setInputValue] = React.useState(() => {
+        if (initialValue !== undefined) return initialValue;
+        if (value === undefined) return "";
+        if (Object.is(value, -0)) return "-0";
+        return String(value);
+    });
+
+    const inputRef = React.useRef<HTMLInputElement>(null);
+
+    React.useEffect(() => {
+        const el = inputRef.current;
+        if (el === null) return;
+        el.focus();
+        if (highlight) {
+            el.setSelectionRange(0, el.value.length);
+        } else {
+            el.setSelectionRange(el.value.length, el.value.length);
+        }
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, []);
 
     React.useLayoutEffect(() => {
         if (validatedSelection !== undefined) {
@@ -53,32 +42,39 @@ const NumberOverlayEditor: React.FunctionComponent<Props> = p => {
         }
     }, [validatedSelection]);
 
-    const decimalSeparatorValue = decimalSeparator ?? getDecimalSeparator();
+    const handleChange = React.useCallback(
+        (e: React.ChangeEvent<HTMLInputElement>) => {
+            const raw = e.target.value;
+            if (raw !== "" && raw !== "-" && raw !== "." && raw !== "-." && Number.isNaN(Number(raw))) return;
+            setInputValue(raw);
+
+            if (raw === "") {
+                onChange(undefined);
+                return;
+            }
+            if (raw === "-" || raw === "." || raw === "-.") return;
+            onChange(Number(raw));
+        },
+        [onChange]
+    );
+
+    const handleBlur = React.useCallback(() => {
+        setInputValue(prev => {
+            if (prev.endsWith(".")) return prev.slice(0, -1);
+            return prev;
+        });
+    }, []);
 
     return (
         <NumberOverlayEditorStyle>
-            <NumericFormat
-                autoFocus={true}
-                getInputRef={inputRef}
+            <input
+                ref={inputRef}
                 className="gdg-input"
-                onFocus={(e: React.FocusEvent<HTMLInputElement>) =>
-                    e.target.setSelectionRange(highlight ? 0 : e.target.value.length, e.target.value.length)
-                }
+                inputMode="decimal"
                 disabled={disabled === true}
-                decimalScale={fixedDecimals}
-                allowNegative={allowNegative}
-                thousandSeparator={thousandSeparator ?? getThousandSeprator()}
-                decimalSeparator={decimalSeparatorValue}
-                value={
-                    initialValue === decimalSeparatorValue
-                        ? `0${decimalSeparatorValue}`
-                        : Object.is(value, -0)
-                        ? "-"
-                        : value ?? ""
-                }
-                // decimalScale={3}
-                // prefix={"$"}
-                onValueChange={onChange}
+                value={inputValue}
+                onChange={handleChange}
+                onBlur={handleBlur}
             />
         </NumberOverlayEditorStyle>
     );

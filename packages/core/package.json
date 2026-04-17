@@ -58,8 +58,7 @@
     "homepage": "https://grid.glideapps.com",
     "dependencies": {
         "@linaria/react": "^6.3.0",
-        "canvas-hypertxt": "^1.0.3",
-        "react-number-format": "^5.4.4"
+        "canvas-hypertxt": "^1.0.3"
     },
     "peerDependencies": {
         "lodash": "^4.17.19",

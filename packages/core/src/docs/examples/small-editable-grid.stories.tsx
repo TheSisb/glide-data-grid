@@ -38,7 +38,6 @@ export const SmallEditableGrid = () => {
                 displayData: "100",
                 readonly: false,
                 allowOverlay: true,
-                allowNegative: true,
             };
         }
         return getCellContent(cell);

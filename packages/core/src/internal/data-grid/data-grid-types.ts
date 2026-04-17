@@ -356,10 +356,6 @@ export interface NumberCell extends BaseGridCell {
     readonly displayData: string;
     readonly data: number | undefined;
     readonly readonly?: boolean;
-    readonly fixedDecimals?: number;
-    readonly allowNegative?: boolean;
-    readonly thousandSeparator?: boolean | string;
-    readonly decimalSeparator?: string;
     readonly hoverEffect?: boolean;
     readonly hoverEffectTheme?: HoverEffectTheme;
 }
