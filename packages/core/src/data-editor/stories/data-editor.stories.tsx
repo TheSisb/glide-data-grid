@@ -794,3 +794,88 @@ export function DeleteColumnsViaOnDelete() {
         </div>
     );
 }
+
+interface OklchStoryPalette {
+    green: string;
+    greenAlpha: string;
+    red: string;
+    tan: string;
+    navy: string;
+    navyAlpha: string;
+    blue: string;
+    blueAlpha: string;
+}
+
+const oklchPalette: OklchStoryPalette = {
+    green: "oklch(0.7 0.15 150)",
+    greenAlpha: "oklch(0.7 0.15 150 / 0.2)",
+    red: "oklch(0.627955 0.257683 29.2339)",
+    tan: "oklch(0.85 0.06 80)",
+    navy: "oklch(0.3 0.05 262)",
+    navyAlpha: "oklch(0.3 0.05 262 / 0.16)",
+    blue: "oklch(0.5 0.2 262)",
+    blueAlpha: "oklch(0.5 0.2 262 / 0.1)",
+};
+
+// The sRGB values Chromium renders for the palette above. Both grids must
+// look identical.
+const srgbPalette: OklchStoryPalette = {
+    green: "rgb(76, 184, 106)",
+    greenAlpha: "rgba(76, 184, 106, 0.2)",
+    red: "rgb(255, 0, 0)",
+    tan: "rgb(227, 202, 162)",
+    navy: "rgb(32, 46, 71)",
+    navyAlpha: "rgba(32, 46, 71, 0.16)",
+    blue: "rgb(25, 87, 210)",
+    blueAlpha: "rgba(25, 87, 210, 0.1)",
+};
+
+export const OklchColors = () => {
+    const makeGrid = (palette: OklchStoryPalette) => {
+        const getCellContent = ([col, row]: Item): GridCell => {
+            const value = ((row * 31 + col * 17) % 200) - 100;
+            const themeOverride =
+                col === 2 ? { bgCell: palette.tan } : value < 0 ? { textDark: palette.red } : undefined;
+            return {
+                kind: GridCellKind.Number,
+                data: value,
+                displayData: value.toString(),
+                allowOverlay: false,
+                themeOverride,
+            };
+        };
+        return (
+            <DataEditor
+                width={680}
+                height={280}
+                initialSize={[680, 280]}
+                columns={[
+                    { title: "Value A", width: 150 },
+                    { title: "Value B", width: 150 },
+                    { title: "Tan background", width: 150 },
+                    { title: "Value D", width: 150 },
+                ]}
+                rows={100}
+                getCellContent={getCellContent}
+                getRowThemeOverride={row => (row % 2 === 1 ? { bgCell: palette.greenAlpha } : undefined)}
+                rowMarkers="both"
+                theme={{
+                    accentColor: palette.blue,
+                    accentLight: palette.blueAlpha,
+                    textDark: palette.navy,
+                    borderColor: palette.navyAlpha,
+                    linkColor: palette.blue,
+                }}
+            />
+        );
+    };
+
+    return (
+        <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+            <div>All colors as oklch() strings</div>
+            {makeGrid(oklchPalette)}
+            <div>The same colors as the sRGB values Chromium resolves them to — must look identical</div>
+            {makeGrid(srgbPalette)}
+        </div>
+    );
+};
