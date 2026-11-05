@@ -18,6 +18,8 @@ export interface ScrollingDataGridProps extends Props {
           ) => void)
         | undefined;
     readonly scrollRef: React.MutableRefObject<HTMLDivElement | null> | undefined;
+    /** Called after the grid has handled the scroller position it reports, even when no cell moved. */
+    readonly onScrollProcessed: ((scrollLeft: number, scrollTop: number) => void) | undefined;
 
     /**
      * The overscroll properties are used to allow the grid to scroll past the logical end of the content by a fixed
@@ -84,6 +86,7 @@ const GridScroller: React.FunctionComponent<ScrollingDataGridProps> = p => {
         className,
         onVisibleRegionChanged,
         scrollRef,
+        onScrollProcessed,
         preventDiagonalScrolling,
         rightElement,
         rightElementProps,
@@ -266,6 +269,7 @@ const GridScroller: React.FunctionComponent<ScrollingDataGridProps> = p => {
             paddingRight={paddingRight}
             rightElementProps={rightElementProps}
             update={onScrollUpdate}
+            onScrollProcessed={onScrollProcessed}
             initialSize={initialSize}>
             <DataGridDnd
                 eventTargetRef={scrollRef}

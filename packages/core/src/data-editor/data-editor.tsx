@@ -151,6 +151,7 @@ type Props = Partial<
         | "onMouseDown"
         | "onMouseMove"
         | "onMouseUp"
+        | "onScrollProcessed"
         | "onVisibleRegionChanged"
         | "rowHeight"
         | "rows"
@@ -1005,7 +1006,8 @@ const DataEditorImpl: React.ForwardRefRenderFunction<DataEditorRef, DataEditorPr
         [rowMarkerOffset, validateCellIn]
     );
 
-    const expectedExternalGridSelection = React.useRef<GridSelection | undefined>(gridSelectionOuter);
+    // Starts empty so that a selection present at mount is scrolled into view like any later external selection.
+    const expectedExternalGridSelection = React.useRef<GridSelection | undefined>(undefined);
     const setGridSelection = React.useCallback(
         (newVal: GridSelection, expand: boolean): void => {
             if (expand) {
@@ -1538,8 +1540,27 @@ const DataEditorImpl: React.ForwardRefRenderFunction<DataEditorRef, DataEditorPr
         [getMangledCellContent, scrollRef, setOverlaySimple]
     );
 
+    // scrollTo measures its target from what the grid has drawn and applies the result to the live scroller position,
+    // so the two must agree. When they do not (before the first draw, or while a scroll has not been drawn yet), the
+    // request waits here and runs once they do. A newer request replaces a waiting one.
+    const pendingScrollToRef = React.useRef<Parameters<ScrollToFn> | undefined>(undefined);
+    const processedScrollRef = React.useRef<{ left: number; top: number } | undefined>(undefined);
+    const regionCommitPendingRef = React.useRef(false);
+
     const scrollTo = React.useCallback<ScrollToFn>(
         (col, row, dir = "both", paddingX = 0, paddingY = 0, options = undefined): void => {
+            const scroller = scrollRef.current;
+            const processed = processedScrollRef.current;
+            const isDrawn =
+                scroller !== null &&
+                canvasRef.current !== null &&
+                gridRef.current !== null &&
+                !regionCommitPendingRef.current &&
+                processed?.left === scroller.scrollLeft &&
+                processed.top === scroller.scrollTop;
+            pendingScrollToRef.current = isDrawn ? undefined : [col, row, dir, paddingX, paddingY, options];
+            if (!isDrawn) return;
+
             if (scrollRef.current !== null) {
                 const grid = gridRef.current;
                 const canvas = canvasRef.current;
@@ -2663,6 +2684,7 @@ const DataEditorImpl: React.ForwardRefRenderFunction<DataEditorRef, DataEditorPr
                 },
             };
             visibleRegionRef.current = newRegion;
+            regionCommitPendingRef.current = true;
             setVisibleRegion(newRegion);
             setClientSize([clientWidth, clientHeight, rightElWidth]);
             onVisibleRegionChanged?.(newRegion, newRegion.tx, newRegion.ty, newRegion.extras);
@@ -3975,6 +3997,24 @@ const DataEditorImpl: React.ForwardRefRenderFunction<DataEditorRef, DataEditorPr
         hasJustScrolled.current = false; //only allow skipping a single scroll
     }, [outCol, outRow]);
 
+    const runPendingScrollTo = React.useCallback(() => {
+        const pending = pendingScrollToRef.current;
+        if (pending !== undefined) scrollToRef.current(...pending);
+    }, []);
+
+    const onScrollProcessed = React.useCallback(
+        (left: number, top: number) => {
+            processedScrollRef.current = { left, top };
+            runPendingScrollTo();
+        },
+        [runPendingScrollTo]
+    );
+
+    React.useLayoutEffect(() => {
+        regionCommitPendingRef.current = false;
+        runPendingScrollTo();
+    }, [visibleRegion, runPendingScrollTo]);
+
     const selectionOutOfBounds =
         gridSelection.current !== undefined &&
         (gridSelection.current.cell[0] >= mangledCols.length || gridSelection.current.cell[1] >= mangledRows);
@@ -4333,6 +4373,7 @@ const DataEditorImpl: React.ForwardRefRenderFunction<DataEditorRef, DataEditorPr
                     onSearchValueChange={onSearchValueChange}
                     rows={mangledRows}
                     scrollRef={scrollRef}
+                    onScrollProcessed={onScrollProcessed}
                     selection={gridSelection}
                     translateX={visibleRegion.tx}
                     translateY={visibleRegion.ty}

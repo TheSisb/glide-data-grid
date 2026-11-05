@@ -138,7 +138,8 @@ const DataEditorImpl = (p, forwardedRef) => {
         const item = [cell[0] - rowMarkerOffset, cell[1]];
         return validateCellIn?.(item, newValue, prevValue);
     }, [rowMarkerOffset, validateCellIn]);
-    const expectedExternalGridSelection = React.useRef(gridSelectionOuter);
+    // Starts empty so that a selection present at mount is scrolled into view like any later external selection.
+    const expectedExternalGridSelection = React.useRef(undefined);
     const setGridSelection = React.useCallback((newVal, expand) => {
         if (expand) {
             newVal = expandSelection(newVal, getCellsForSelection, rowMarkerOffset, spanRangeBehavior, abortControllerRef.current);
@@ -537,7 +538,24 @@ const DataEditorImpl = (p, forwardedRef) => {
             activation: { inputType: "keyboard", key: "Enter" },
         });
     }, [getMangledCellContent, scrollRef, setOverlaySimple]);
+    // scrollTo measures its target from what the grid has drawn and applies the result to the live scroller position,
+    // so the two must agree. When they do not (before the first draw, or while a scroll has not been drawn yet), the
+    // request waits here and runs once they do. A newer request replaces a waiting one.
+    const pendingScrollToRef = React.useRef(undefined);
+    const processedScrollRef = React.useRef(undefined);
+    const regionCommitPendingRef = React.useRef(false);
     const scrollTo = React.useCallback((col, row, dir = "both", paddingX = 0, paddingY = 0, options = undefined) => {
+        const scroller = scrollRef.current;
+        const processed = processedScrollRef.current;
+        const isDrawn = scroller !== null &&
+            canvasRef.current !== null &&
+            gridRef.current !== null &&
+            !regionCommitPendingRef.current &&
+            processed?.left === scroller.scrollLeft &&
+            processed.top === scroller.scrollTop;
+        pendingScrollToRef.current = isDrawn ? undefined : [col, row, dir, paddingX, paddingY, options];
+        if (!isDrawn)
+            return;
         if (scrollRef.current !== null) {
             const grid = gridRef.current;
             const canvas = canvasRef.current;
@@ -1483,6 +1501,7 @@ const DataEditorImpl = (p, forwardedRef) => {
             },
         };
         visibleRegionRef.current = newRegion;
+        regionCommitPendingRef.current = true;
         setVisibleRegion(newRegion);
         setClientSize([clientWidth, clientHeight, rightElWidth]);
         onVisibleRegionChanged?.(newRegion, newRegion.tx, newRegion.ty, newRegion.extras);
@@ -2645,6 +2664,19 @@ const DataEditorImpl = (p, forwardedRef) => {
         }
         hasJustScrolled.current = false; //only allow skipping a single scroll
     }, [outCol, outRow]);
+    const runPendingScrollTo = React.useCallback(() => {
+        const pending = pendingScrollToRef.current;
+        if (pending !== undefined)
+            scrollToRef.current(...pending);
+    }, []);
+    const onScrollProcessed = React.useCallback((left, top) => {
+        processedScrollRef.current = { left, top };
+        runPendingScrollTo();
+    }, [runPendingScrollTo]);
+    React.useLayoutEffect(() => {
+        regionCommitPendingRef.current = false;
+        runPendingScrollTo();
+    }, [visibleRegion, runPendingScrollTo]);
     const selectionOutOfBounds = gridSelection.current !== undefined &&
         (gridSelection.current.cell[0] >= mangledCols.length || gridSelection.current.cell[1] >= mangledRows);
     React.useLayoutEffect(() => {
@@ -2861,7 +2893,7 @@ const DataEditorImpl = (p, forwardedRef) => {
     }, [mergedTheme]);
     return (React.createElement(ThemeContext.Provider, { value: mergedTheme },
         React.createElement(DataEditorContainer, { style: cssStyle, className: className, inWidth: width ?? idealWidth, inHeight: height ?? idealHeight },
-            React.createElement(DataGridSearch, { fillHandle: fillHandle, drawFocusRing: drawFocusRing, experimental: experimental, fixedShadowX: fixedShadowX, fixedShadowY: fixedShadowY, getRowThemeOverride: getRowThemeOverride, headerIcons: headerIcons, imageWindowLoader: imageWindowLoader, initialSize: initialSize, isDraggable: isDraggable, onDragLeave: onDragLeave, onRowMoved: onRowMoved, overscrollX: overscrollX, overscrollY: overscrollY, preventDiagonalScrolling: preventDiagonalScrolling, rightElement: rightElement, rightElementProps: rightElementProps, smoothScrollX: smoothScrollX, smoothScrollY: smoothScrollY, className: className, enableGroups: enableGroups, onCanvasFocused: onCanvasFocused, onCanvasBlur: onFocusOut, canvasRef: canvasRef, onContextMenu: onContextMenu, theme: mergedTheme, cellXOffset: cellXOffset, cellYOffset: cellYOffset, accessibilityHeight: visibleRegion.height, onDragEnd: onDragEnd, columns: mangledCols, nonGrowWidth: nonGrowWidth, drawHeader: drawHeader, onColumnProposeMove: onColumnProposeMoveImpl, drawCell: drawCell, disabledRows: disabledRows, freezeColumns: mangledFreezeColumns, lockColumns: rowMarkerOffset, firstColAccessible: rowMarkerOffset === 0, getCellContent: getMangledCellContent, minColumnWidth: minColumnWidth, maxColumnWidth: maxColumnWidth, searchInputRef: searchInputRef, showSearch: showSearch, onSearchClose: onSearchClose, highlightRegions: highlightRegions, getCellsForSelection: getCellsForSelection, getGroupDetails: mangledGetGroupDetails, headerHeight: headerHeight, isFocused: isFocused, groupHeaderHeight: enableGroups ? groupHeaderHeight : 0, freezeTrailingRows: freezeTrailingRows + (showTrailingBlankRow && trailingRowOptions?.sticky === true ? 1 : 0), hasAppendRow: showTrailingBlankRow, onColumnResize: onColumnResize, onColumnResizeEnd: onColumnResizeEnd, onColumnResizeStart: onColumnResizeStart, onCellFocused: onCellFocused, onColumnMoved: onColumnMovedImpl, onDragStart: onDragStartImpl, onHeaderMenuClick: onHeaderMenuClickInner, onHeaderIndicatorClick: onHeaderIndicatorClickInner, onItemHovered: onItemHoveredImpl, isFilling: mouseState?.fillHandle === true, onMouseMove: onMouseMoveImpl, onKeyDown: onKeyDown, onKeyUp: onKeyUpIn, onMouseDown: onMouseDown, onMouseUp: onMouseUp, onDragOverCell: onDragOverCell, onDrop: onDrop, onSearchResultsChanged: onSearchResultsChanged, onVisibleRegionChanged: onVisibleRegionChangedImpl, clientSize: clientSize, rowHeight: rowHeight, searchResults: searchResults, searchValue: searchValue, onSearchValueChange: onSearchValueChange, rows: mangledRows, scrollRef: scrollRef, selection: gridSelection, translateX: visibleRegion.tx, translateY: visibleRegion.ty, verticalBorder: mangledVerticalBorder, gridRef: gridRef, getCellRenderer: getCellRenderer, resizeIndicator: resizeIndicator }),
+            React.createElement(DataGridSearch, { fillHandle: fillHandle, drawFocusRing: drawFocusRing, experimental: experimental, fixedShadowX: fixedShadowX, fixedShadowY: fixedShadowY, getRowThemeOverride: getRowThemeOverride, headerIcons: headerIcons, imageWindowLoader: imageWindowLoader, initialSize: initialSize, isDraggable: isDraggable, onDragLeave: onDragLeave, onRowMoved: onRowMoved, overscrollX: overscrollX, overscrollY: overscrollY, preventDiagonalScrolling: preventDiagonalScrolling, rightElement: rightElement, rightElementProps: rightElementProps, smoothScrollX: smoothScrollX, smoothScrollY: smoothScrollY, className: className, enableGroups: enableGroups, onCanvasFocused: onCanvasFocused, onCanvasBlur: onFocusOut, canvasRef: canvasRef, onContextMenu: onContextMenu, theme: mergedTheme, cellXOffset: cellXOffset, cellYOffset: cellYOffset, accessibilityHeight: visibleRegion.height, onDragEnd: onDragEnd, columns: mangledCols, nonGrowWidth: nonGrowWidth, drawHeader: drawHeader, onColumnProposeMove: onColumnProposeMoveImpl, drawCell: drawCell, disabledRows: disabledRows, freezeColumns: mangledFreezeColumns, lockColumns: rowMarkerOffset, firstColAccessible: rowMarkerOffset === 0, getCellContent: getMangledCellContent, minColumnWidth: minColumnWidth, maxColumnWidth: maxColumnWidth, searchInputRef: searchInputRef, showSearch: showSearch, onSearchClose: onSearchClose, highlightRegions: highlightRegions, getCellsForSelection: getCellsForSelection, getGroupDetails: mangledGetGroupDetails, headerHeight: headerHeight, isFocused: isFocused, groupHeaderHeight: enableGroups ? groupHeaderHeight : 0, freezeTrailingRows: freezeTrailingRows + (showTrailingBlankRow && trailingRowOptions?.sticky === true ? 1 : 0), hasAppendRow: showTrailingBlankRow, onColumnResize: onColumnResize, onColumnResizeEnd: onColumnResizeEnd, onColumnResizeStart: onColumnResizeStart, onCellFocused: onCellFocused, onColumnMoved: onColumnMovedImpl, onDragStart: onDragStartImpl, onHeaderMenuClick: onHeaderMenuClickInner, onHeaderIndicatorClick: onHeaderIndicatorClickInner, onItemHovered: onItemHoveredImpl, isFilling: mouseState?.fillHandle === true, onMouseMove: onMouseMoveImpl, onKeyDown: onKeyDown, onKeyUp: onKeyUpIn, onMouseDown: onMouseDown, onMouseUp: onMouseUp, onDragOverCell: onDragOverCell, onDrop: onDrop, onSearchResultsChanged: onSearchResultsChanged, onVisibleRegionChanged: onVisibleRegionChangedImpl, clientSize: clientSize, rowHeight: rowHeight, searchResults: searchResults, searchValue: searchValue, onSearchValueChange: onSearchValueChange, rows: mangledRows, scrollRef: scrollRef, onScrollProcessed: onScrollProcessed, selection: gridSelection, translateX: visibleRegion.tx, translateY: visibleRegion.ty, verticalBorder: mangledVerticalBorder, gridRef: gridRef, getCellRenderer: getCellRenderer, resizeIndicator: resizeIndicator }),
             renameGroupNode,
             overlay !== undefined && (React.createElement(React.Suspense, { fallback: null },
                 React.createElement(DataGridOverlayEditor, { ...overlay, validateCell: validateCell, bloom: editorBloom, id: overlayID, getCellRenderer: getCellRenderer, className: experimental?.isSubGrid === true ? "click-outside-ignore" : undefined, provideEditor: provideEditor, imageEditorOverride: imageEditorOverride, portalElementRef: portalElementRef, onFinishEditing: onFinishEditing, markdownDivCreateNode: markdownDivCreateNode, isOutsideClick: isOutsideClick, customEventTarget: experimental?.eventTarget }))))));

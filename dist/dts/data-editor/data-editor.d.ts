@@ -18,7 +18,7 @@ export interface RowMarkerOptions {
     headerAlwaysVisible?: boolean;
     headerDisabled?: boolean;
 }
-type Props = Partial<Omit<DataGridSearchProps, "accessibilityHeight" | "canvasRef" | "cellXOffset" | "cellYOffset" | "className" | "clientSize" | "columns" | "disabledRows" | "drawFocusRing" | "enableGroups" | "firstColAccessible" | "firstColSticky" | "freezeColumns" | "hasAppendRow" | "getCellContent" | "getCellRenderer" | "getCellsForSelection" | "getRowThemeOverride" | "gridRef" | "groupHeaderHeight" | "headerHeight" | "isFilling" | "isFocused" | "imageWindowLoader" | "lockColumns" | "maxColumnWidth" | "minColumnWidth" | "nonGrowWidth" | "onCanvasBlur" | "onCanvasFocused" | "onCellFocused" | "onContextMenu" | "onDragEnd" | "onMouseDown" | "onMouseMove" | "onMouseUp" | "onVisibleRegionChanged" | "rowHeight" | "rows" | "scrollRef" | "searchInputRef" | "selectedColumns" | "selection" | "theme" | "translateX" | "translateY" | "verticalBorder">>;
+type Props = Partial<Omit<DataGridSearchProps, "accessibilityHeight" | "canvasRef" | "cellXOffset" | "cellYOffset" | "className" | "clientSize" | "columns" | "disabledRows" | "drawFocusRing" | "enableGroups" | "firstColAccessible" | "firstColSticky" | "freezeColumns" | "hasAppendRow" | "getCellContent" | "getCellRenderer" | "getCellsForSelection" | "getRowThemeOverride" | "gridRef" | "groupHeaderHeight" | "headerHeight" | "isFilling" | "isFocused" | "imageWindowLoader" | "lockColumns" | "maxColumnWidth" | "minColumnWidth" | "nonGrowWidth" | "onCanvasBlur" | "onCanvasFocused" | "onCellFocused" | "onContextMenu" | "onDragEnd" | "onMouseDown" | "onMouseMove" | "onMouseUp" | "onScrollProcessed" | "onVisibleRegionChanged" | "rowHeight" | "rows" | "scrollRef" | "searchInputRef" | "selectedColumns" | "selection" | "theme" | "translateX" | "translateY" | "verticalBorder">>;
 type EmitEvents = "copy" | "paste" | "delete" | "fill-right" | "fill-down";
 /**
  * @category DataEditor
@@ -537,3 +537,4 @@ export declare const emptyGridSelection: GridSelection;
  */
 export declare const DataEditor: React.ForwardRefExoticComponent<DataEditorProps & React.RefAttributes<DataEditorRef>>;
 export {};
+//# sourceMappingURL=data-editor.d.ts.map

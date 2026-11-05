@@ -3889,6 +3889,94 @@ describe("data-editor", () => {
         });
     });
 
+    test("Selection present at mount scrolls into view", async () => {
+        vi.useFakeTimers();
+        render(
+            <DataEditor
+                {...basicProps}
+                rows={10_000}
+                gridSelection={{
+                    current: { cell: [5, 500], range: { x: 5, y: 500, width: 1, height: 1 }, rangeStack: [] },
+                    columns: CompactSelection.empty(),
+                    rows: CompactSelection.empty(),
+                }}
+                onGridSelectionChange={vi.fn()}
+            />,
+            { wrapper: Context }
+        );
+        expect(Element.prototype.scrollTo).not.toBeCalled();
+        prep(false);
+        expect(Element.prototype.scrollTo).toBeCalledTimes(1);
+        expect(Element.prototype.scrollTo).toBeCalledWith({ behavior: "auto", left: 0, top: 15_101 });
+    });
+
+    test("scrollTo before the first draw runs after it", async () => {
+        vi.useFakeTimers();
+        const ref = React.createRef<DataEditorRef>();
+        render(<EventedDataEditor ref={ref} {...basicProps} rows={10_000} />, { wrapper: Context });
+
+        act(() => {
+            ref.current?.scrollTo(5, 20);
+            ref.current?.scrollTo(5, 500);
+        });
+        expect(Element.prototype.scrollTo).not.toBeCalled();
+
+        prep(false);
+        expect(Element.prototype.scrollTo).toBeCalledTimes(1);
+        expect(Element.prototype.scrollTo).toBeCalledWith({ behavior: "auto", left: 0, top: 15_101 });
+    });
+
+    test("scrollTo waits until the current scroll position has been drawn", async () => {
+        vi.useFakeTimers();
+        const ref = React.createRef<DataEditorRef>();
+        render(<EventedDataEditor ref={ref} {...basicProps} rows={10_000} />, { wrapper: Context });
+        prep(false);
+
+        const scroller = document.getElementsByClassName("dvn-scroller").item(0) as HTMLElement;
+        const scrollTop = vi.spyOn(scroller, "scrollTop", "get").mockImplementation(() => 0);
+        const scrollToSpy = Element.prototype.scrollTo as Mock;
+        scrollToSpy.mockImplementation(({ top }: { top: number }) => {
+            scrollTop.mockImplementation(() => top);
+        });
+
+        act(() => {
+            ref.current?.scrollTo(5, 500);
+            ref.current?.scrollTo(5, 500);
+            ref.current?.scrollTo(5, 300);
+        });
+        expect(scrollToSpy).toBeCalledTimes(1);
+
+        act(() => {
+            fireEvent.scroll(scroller);
+            vi.runAllTimers();
+        });
+        expect(scrollToSpy).toBeCalledTimes(2);
+        expect(scrollToSpy).toHaveBeenLastCalledWith({ behavior: "auto", left: 0, top: 9597 });
+    });
+
+    test("scrollTo does not wait for a scroll that moves no cell", async () => {
+        vi.useFakeTimers();
+        const ref = React.createRef<DataEditorRef>();
+        render(<EventedDataEditor ref={ref} {...basicProps} rows={10_000} />, { wrapper: Context });
+        prep(false);
+
+        const scroller = document.getElementsByClassName("dvn-scroller").item(0) as HTMLElement;
+        const scrollTop = vi.spyOn(scroller, "scrollTop", "get").mockImplementation(() => 1);
+        act(() => {
+            fireEvent.scroll(scroller);
+            vi.runAllTimers();
+        });
+        scrollTop.mockImplementation(() => 2);
+        act(() => {
+            fireEvent.scroll(scroller);
+        });
+
+        act(() => {
+            ref.current?.scrollTo(5, 500);
+        });
+        expect(Element.prototype.scrollTo).toBeCalledTimes(1);
+    });
+
     test("Imperative scrollTo pixel", async () => {
         vi.useFakeTimers();
         const ref = React.createRef<DataEditorRef>();
