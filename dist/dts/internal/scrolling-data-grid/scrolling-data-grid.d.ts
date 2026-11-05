@@ -6,6 +6,8 @@ export interface ScrollingDataGridProps extends Props {
     readonly className: string | undefined;
     readonly onVisibleRegionChanged: ((range: Rectangle, clientWidth: number, clientHeight: number, rightElWidth: number, tx: number, ty: number) => void) | undefined;
     readonly scrollRef: React.MutableRefObject<HTMLDivElement | null> | undefined;
+    /** Called after the grid has handled the scroller position it reports, even when no cell moved. */
+    readonly onScrollProcessed: ((scrollLeft: number, scrollTop: number) => void) | undefined;
     /**
      * The overscroll properties are used to allow the grid to scroll past the logical end of the content by a fixed
      * number of pixels. This is useful particularly on the X axis if you allow for resizing columns as it can make
@@ -54,3 +56,4 @@ export interface ScrollingDataGridProps extends Props {
 }
 declare const GridScroller: React.FunctionComponent<ScrollingDataGridProps>;
 export default GridScroller;
+//# sourceMappingURL=scrolling-data-grid.d.ts.map

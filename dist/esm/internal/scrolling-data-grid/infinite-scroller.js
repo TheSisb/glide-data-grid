@@ -56,6 +56,7 @@ export const InfiniteScroller = p => {
     scrollHeight,
     scrollWidth,
     update,
+    onScrollProcessed,
     draggable,
     className,
     preventDiagonalScrolling = false,
@@ -170,7 +171,8 @@ export const InfiniteScroller = p => {
       height: cHeight - paddingBottom,
       paddingRight: rightWrapRef.current?.clientWidth ?? 0
     });
-  }, [paddingBottom, paddingRight, scrollHeight, update, preventDiagonalScrolling, hasTouches]);
+    onScrollProcessed?.(el.scrollLeft, el.scrollTop);
+  }, [paddingBottom, paddingRight, scrollHeight, update, onScrollProcessed, preventDiagonalScrolling, hasTouches]);
   useKineticScroll(kineticScrollPerfHack && browserIsSafari.value, onScroll, scroller);
   const onScrollRef = React.useRef(onScroll);
   onScrollRef.current = onScroll;
