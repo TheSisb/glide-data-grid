@@ -1,0 +1,10 @@
+import{R as o}from"./iframe-Dhcyq7de.js";import{D as d}from"./data-editor-all-Com2fbGs.js";import{B as c,D as m,P as p,u,d as g}from"./utils-B7niFk0r.js";import{a as C}from"./image-window-loader-BPshvM3J.js";import{S as G}from"./story-utils-CWQcs54g.js";import"./preload-helper-C1FmrZbK.js";import"./throttle-DdZATOY8.js";import"./flatten-BR3zCJeW.js";import"./scrolling-data-grid-BG1AsV2v.js";import"./marked.esm-C1hZZ7vL.js";import"./click-outside-container-_igJyHAJ.js";import"./index-D_kXk1yT.js";import"./throttle--dN168Gr.js";const $={title:"Glide-Data-Grid/DataEditor Demos",decorators:[a=>o.createElement(G,null,o.createElement(c,{title:"Column Grouping",description:o.createElement(m,null,"Columns in the data grid may be grouped by setting their ",o.createElement(p,null,"group")," ","property.")},o.createElement(a,null)))]},t=()=>{const{cols:a,getCellContent:i}=u(20,!0,!0);return o.createElement(d,{...g,getCellContent:i,onGroupHeaderRenamed:(e,r)=>window.alert(`Please rename group ${e} to ${r}`),onHeaderClicked:(e,r)=>console.log("header clicked",e,r),onGroupHeaderClicked:(e,r)=>console.log("group header clicked",e,r),columns:a,rows:1e3,getGroupDetails:e=>({name:e,icon:e===""?void 0:C.HeaderCode}),rowMarkers:"both"})};var n,l,s;t.parameters={...t.parameters,docs:{...(n=t.parameters)==null?void 0:n.docs,source:{originalSource:`() => {
+  const {
+    cols,
+    getCellContent
+  } = useMockDataGenerator(20, true, true);
+  return <DataEditor {...defaultProps} getCellContent={getCellContent} onGroupHeaderRenamed={(x, y) => window.alert(\`Please rename group \${x} to \${y}\`)} onHeaderClicked={(x, y) => console.log("header clicked", x, y)} onGroupHeaderClicked={(x, y) => console.log("group header clicked", x, y)} columns={cols} rows={1000} getGroupDetails={g => ({
+    name: g,
+    icon: g === "" ? undefined : GridColumnIcon.HeaderCode
+  })} rowMarkers="both" />;
+}`,...(s=(l=t.parameters)==null?void 0:l.docs)==null?void 0:s.source}}};const S=["ColumnGroups"];export{t as ColumnGroups,S as __namedExportsOrder,$ as default};
