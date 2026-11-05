@@ -599,17 +599,17 @@ a new line char ""more quotes"" plus a tab  ."	https://google.com`)
         prep();
         const canvas = screen.getByTestId("data-grid-canvas");
 
-        fireEvent.pointerDown(canvas, {
+        fireEvent.mouseDown(canvas, {
             clientX: 20,
             clientY: 36 + 32 * 3 + 16,
         });
 
-        fireEvent.pointerMove(canvas, {
+        fireEvent.mouseMove(canvas, {
             clientX: 20,
             clientY: 36 + 32 * 3 + 16,
         });
 
-        fireEvent.pointerUp(canvas, {
+        fireEvent.mouseUp(canvas, {
             clientX: 20,
             clientY: 36 + 32 * 3 + 16,
         });
@@ -652,17 +652,17 @@ a new line char ""more quotes"" plus a tab  ."	https://google.com`)
         prep();
         const canvas = screen.getByTestId("data-grid-canvas");
 
-        fireEvent.pointerDown(canvas, {
+        fireEvent.mouseDown(canvas, {
             clientX: 220,
             clientY: 16,
         });
 
-        fireEvent.pointerMove(canvas, {
+        fireEvent.mouseMove(canvas, {
             clientX: 220,
             clientY: 16,
         });
 
-        fireEvent.pointerUp(canvas, {
+        fireEvent.mouseUp(canvas, {
             clientX: 220,
             clientY: 16,
         });

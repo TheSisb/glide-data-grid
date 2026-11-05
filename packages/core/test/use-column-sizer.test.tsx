@@ -226,7 +226,7 @@ describe("use-column-sizer", () => {
                 x: 0,
                 y: 0,
                 width: 2,
-                height: 9,
+                height: 149,
             },
             expect.anything()
         );

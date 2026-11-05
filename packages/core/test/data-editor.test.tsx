@@ -4941,18 +4941,18 @@ describe("data-editor", () => {
         spy.mockClear();
 
         // Now drag on the row marker from row 2 to row 5
-        fireEvent.pointerDown(canvas, {
+        fireEvent.mouseDown(canvas, {
             clientX: 10,
             clientY: 36 + 32 * 1 + 16,
         });
 
-        fireEvent.pointerMove(canvas, {
+        fireEvent.mouseMove(canvas, {
             clientX: 10,
             clientY: 36 + 32 * 4 + 16,
             buttons: 1,
         });
 
-        fireEvent.pointerUp(canvas, {
+        fireEvent.mouseUp(canvas, {
             clientX: 10,
             clientY: 36 + 32 * 4 + 16,
         });
