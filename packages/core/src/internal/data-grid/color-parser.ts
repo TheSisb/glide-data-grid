@@ -26,12 +26,17 @@ function warnUnparsable(color: string): void {
 
 // CSS Color 4 keeps oklch() in its functional form when styles are computed,
 // so the legacy rgb() split cannot read it. This parses the plain literal
-// grammar: numbers or percentages, an optional deg unit, an optional / alpha.
-// Other forms still resolve through the browser, which serializes them back
-// into this plain form.
-const oklchRegex = /^oklch\(\s*([\d+.e-]+%?)\s+([\d+.e-]+%?)\s+([\d+.e-]+)(?:deg)?\s*(?:\/\s*([\d+.e-]+%?))?\s*\)$/;
+// grammar: CSS numbers or percentages, the none keyword, an optional deg unit,
+// an optional / alpha. Other forms, such as calc() or other hue units, resolve
+// through the browser, which serializes them back into this plain form.
+const cssNumber = String.raw`[+-]?(?:\d*\.)?\d+(?:e[+-]?\d+)?`;
+const oklchComponent = `none|${cssNumber}%?`;
+const oklchRegex = new RegExp(
+    String.raw`^oklch\(\s*(${oklchComponent})\s+(${oklchComponent})\s+(none|${cssNumber}(?:deg)?)\s*(?:/\s*(${oklchComponent})\s*)?\)$`
+);
 
 function parseOklchComponent(raw: string, percentScale: number): number {
+    if (raw === "none") return 0;
     if (raw.endsWith("%")) return (Number.parseFloat(raw) / 100) * percentScale;
     return Number.parseFloat(raw);
 }
@@ -40,11 +45,13 @@ function parseOklch(color: string): Rgba | undefined {
     const match = oklchRegex.exec(color);
     if (match === null) return undefined;
 
-    const lightness = parseOklchComponent(match[1], 1);
-    const chroma = parseOklchComponent(match[2], 0.4);
-    const hue = Number.parseFloat(match[3]);
+    // CSS clamps lightness to 0..1 and chroma to 0 or more when it parses a color.
+    const lightness = Math.min(1, Math.max(0, parseOklchComponent(match[1], 1)));
+    const chroma = Math.max(0, parseOklchComponent(match[2], 0.4));
+    const hue = parseOklchComponent(match[3], 1);
     const alpha = match[4] === undefined ? 1 : parseOklchComponent(match[4], 1);
-    if (Number.isNaN(lightness) || Number.isNaN(chroma) || Number.isNaN(hue) || Number.isNaN(alpha)) return undefined;
+    // Very large exponents overflow to Infinity. The browser path resolves these.
+    if (!Number.isFinite(chroma) || !Number.isFinite(hue)) return undefined;
 
     // oklch is the polar form of oklab.
     const hueRadians = (hue * Math.PI) / 180;
@@ -63,8 +70,8 @@ function parseOklch(color: string): Rgba | undefined {
     const s = (lightness - 0.089_484_177_5 * labA - 1.291_485_548 * labB) ** 3;
 
     // Linear → gamma encoded sRGB, then to a byte. Out of gamut channels are
-    // clamped; browsers gamut-map by reducing chroma instead, so far out of
-    // gamut colors can differ slightly.
+    // clamped one at a time. color-parser.test.ts pins this against Chromium's
+    // canvas, including a far out of gamut blue.
     const toSrgbByte = (linear: number): number => {
         const srgb = linear <= 0.003_130_8 ? 12.92 * linear : 1.055 * Math.pow(linear, 1 / 2.4) - 0.055;
         return Math.round(Math.min(255, Math.max(0, srgb * 255)));
@@ -81,21 +88,45 @@ function parseOklch(color: string): Rgba | undefined {
 
 // Legacy colors (hex, named, rgb, hsl) compute to "rgb(r, g, b)" or
 // "rgba(r, g, b, a)".
-function parseLegacyRgb(serialized: string): Rgba {
+function parseLegacyRgb(serialized: string, color: string): Rgba {
     const [r, g, b, a = 1] = serialized
         .replace(/[^\d,.]/g, "")
         .split(",")
         .map(Number.parseFloat);
     const orZero = (channel: number): number => {
         if (!Number.isNaN(channel)) return channel;
-        warnUnparsable(serialized);
+        warnUnparsable(color);
         return 0;
     };
     return [orZero(r), orZero(g), orZero(b), orZero(a)];
 }
 
+let readbackContext: CanvasRenderingContext2D | null | undefined;
+
+// Paints any other valid color (lab(), oklab(), color(), ...) and reads the pixel
+// back. Canvas pixels are stored premultiplied, so channels lose precision at low
+// alpha. The legacy and oklch paths above do not have this loss.
+function readCanvasPixel(serialized: string, color: string): Rgba {
+    if (readbackContext === undefined) {
+        const canvas = document.createElement("canvas");
+        canvas.width = 1;
+        canvas.height = 1;
+        readbackContext = canvas.getContext("2d", { willReadFrequently: true });
+    }
+    if (readbackContext === null) {
+        warnUnparsable(color);
+        return [0, 0, 0, 1];
+    }
+
+    readbackContext.clearRect(0, 0, 1, 1);
+    readbackContext.fillStyle = serialized;
+    readbackContext.fillRect(0, 0, 1, 1);
+    const [r, g, b, a] = readbackContext.getImageData(0, 0, 1, 1).data;
+    return [r, g, b, a / 255];
+}
+
 // Resolves any other color form through the browser and reads back its
-// computed serialization.
+// computed serialization. Returns undefined only for an invalid color.
 function parseWithBrowser(color: string): Rgba | undefined {
     div = div || createDiv();
 
@@ -111,11 +142,9 @@ function parseWithBrowser(color: string): Rgba | undefined {
     if (computedColor !== control) return undefined;
 
     const serialized = computedColor.toLowerCase();
-    if (serialized.startsWith("rgb")) return parseLegacyRgb(serialized);
+    if (serialized.startsWith("rgb")) return parseLegacyRgb(serialized, color);
 
-    const oklch = parseOklch(serialized);
-    if (oklch === undefined) warnUnparsable(color);
-    return oklch;
+    return parseOklch(serialized) ?? readCanvasPixel(serialized, color);
 }
 
 /** @category Drawing */

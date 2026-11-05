@@ -817,8 +817,8 @@ const oklchPalette: OklchStoryPalette = {
     blueAlpha: "oklch(0.5 0.2 262 / 0.1)",
 };
 
-// The sRGB values Chromium renders for the palette above. Both grids must
-// look identical.
+// The sRGB values Chromium renders for the palette above, for comparing the two
+// grids by eye. color-parser.test.ts holds the automated checks.
 const srgbPalette: OklchStoryPalette = {
     green: "rgb(76, 184, 106)",
     greenAlpha: "rgba(76, 184, 106, 0.2)",
@@ -874,7 +874,7 @@ export const OklchColors = () => {
         <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
             <div>All colors as oklch() strings</div>
             {makeGrid(oklchPalette)}
-            <div>The same colors as the sRGB values Chromium resolves them to — must look identical</div>
+            <div>The same colors as the sRGB values Chromium resolves them to, for comparing by eye</div>
             {makeGrid(srgbPalette)}
         </div>
     );
