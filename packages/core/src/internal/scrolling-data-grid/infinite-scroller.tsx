@@ -25,6 +25,7 @@ interface Props {
     readonly kineticScrollPerfHack?: boolean;
     readonly scrollRef?: React.MutableRefObject<HTMLDivElement | null>;
     readonly update: (region: Rectangle & { paddingRight: number }) => void;
+    readonly onScrollProcessed?: (scrollLeft: number, scrollTop: number) => void;
 }
 
 const ScrollRegionStyle = styled.div<{ isSafari: boolean }>`
@@ -137,6 +138,7 @@ export const InfiniteScroller: React.FC<Props> = p => {
         scrollHeight,
         scrollWidth,
         update,
+        onScrollProcessed,
         draggable,
         className,
         preventDiagonalScrolling = false,
@@ -281,8 +283,9 @@ export const InfiniteScroller: React.FC<Props> = p => {
                 height: cHeight - paddingBottom,
                 paddingRight: rightWrapRef.current?.clientWidth ?? 0,
             });
+            onScrollProcessed?.(el.scrollLeft, el.scrollTop);
         },
-        [paddingBottom, paddingRight, scrollHeight, update, preventDiagonalScrolling, hasTouches]
+        [paddingBottom, paddingRight, scrollHeight, update, onScrollProcessed, preventDiagonalScrolling, hasTouches]
     );
 
     useKineticScroll(kineticScrollPerfHack && browserIsSafari.value, onScroll, scroller);
