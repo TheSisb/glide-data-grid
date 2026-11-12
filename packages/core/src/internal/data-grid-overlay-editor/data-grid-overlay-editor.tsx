@@ -21,6 +21,7 @@ import type { CellActivatedEventArgs } from "../data-grid/event-args.js";
 import { DataGridOverlayEditorStyle } from "./data-grid-overlay-editor-style.js";
 import type { OverlayImageEditorProps } from "./private/image-overlay-editor.js";
 import { useStayOnScreen } from "./use-stay-on-screen.js";
+import { useStableCallback } from "../../common/use-stable-callback.js";
 
 type ImageEditorType = React.ComponentType<OverlayImageEditorProps>;
 
@@ -84,80 +85,70 @@ const DataGridOverlayEditor: React.FunctionComponent<DataGridOverlayEditorProps>
         return !(isEditableGridCell(content) && validateCell?.(cell, content, lastValueRef.current) === false);
     });
 
-    const onFinishEditing = React.useCallback<typeof onFinishEditingIn>(
-        (newCell, movement) => {
-            onFinishEditingIn(isValid ? newCell : undefined, movement);
-        },
-        [isValid, onFinishEditingIn]
-    );
+    const onFinishEditing = useStableCallback<typeof onFinishEditingIn>((newCell, movement) => {
+        onFinishEditingIn(isValid ? newCell : undefined, movement);
+    });
 
-    const setTempValue = React.useCallback(
-        (newVal: GridCell | undefined) => {
-            if (validateCell !== undefined && newVal !== undefined && isEditableGridCell(newVal)) {
-                const validResult = validateCell(cell, newVal, lastValueRef.current);
-                if (validResult === false) {
-                    setIsValid(false);
-                } else if (typeof validResult === "object") {
-                    newVal = validResult;
-                    setIsValid(true);
-                } else {
-                    setIsValid(true);
-                }
+    const setTempValue = useStableCallback((newVal: GridCell | undefined) => {
+        if (validateCell !== undefined && newVal !== undefined && isEditableGridCell(newVal)) {
+            const validResult = validateCell(cell, newVal, lastValueRef.current);
+            if (validResult === false) {
+                setIsValid(false);
+            } else if (typeof validResult === "object") {
+                newVal = validResult;
+                setIsValid(true);
+            } else {
+                setIsValid(true);
             }
-            setTempValueRaw(newVal);
-        },
-        [cell, validateCell]
-    );
+        }
+        setTempValueRaw(newVal);
+    });
 
     const finished = React.useRef(false);
     const customMotion = React.useRef<[-1 | 0 | 1, -1 | 0 | 1] | undefined>(undefined);
 
-    const onClickOutside = React.useCallback(() => {
+    const onClickOutside = useStableCallback(() => {
         onFinishEditing(tempValue, [0, 0]);
         finished.current = true;
-    }, [tempValue, onFinishEditing]);
+    });
 
-    const onEditorFinished = React.useCallback(
+    const onEditorFinished = useStableCallback(
         (newValue: GridCell | undefined, movement?: readonly [-1 | 0 | 1, -1 | 0 | 1]) => {
             onFinishEditing(newValue, movement ?? customMotion.current ?? [0, 0]);
             finished.current = true;
-        },
-        [onFinishEditing]
+        }
     );
 
-    const onKeyDown = React.useCallback(
-        async (event: React.KeyboardEvent) => {
-            let save = false;
-            if (event.key === "Escape") {
-                event.stopPropagation();
-                event.preventDefault();
-                customMotion.current = [0, 0];
-            } else if (
-                event.key === "Enter" &&
-                // The shift key is reserved for multi-line editing
-                // to allow inserting new lines without closing the editor.
-                !event.shiftKey
-            ) {
-                event.stopPropagation();
-                event.preventDefault();
-                customMotion.current = [0, 1];
-                save = true;
-            } else if (event.key === "Tab") {
-                event.stopPropagation();
-                event.preventDefault();
-                customMotion.current = [event.shiftKey ? -1 : 1, 0];
-                save = true;
+    const onKeyDown = useStableCallback(async (event: React.KeyboardEvent) => {
+        let save = false;
+        if (event.key === "Escape") {
+            event.stopPropagation();
+            event.preventDefault();
+            customMotion.current = [0, 0];
+        } else if (
+            event.key === "Enter" &&
+            // The shift key is reserved for multi-line editing
+            // to allow inserting new lines without closing the editor.
+            !event.shiftKey
+        ) {
+            event.stopPropagation();
+            event.preventDefault();
+            customMotion.current = [0, 1];
+            save = true;
+        } else if (event.key === "Tab") {
+            event.stopPropagation();
+            event.preventDefault();
+            customMotion.current = [event.shiftKey ? -1 : 1, 0];
+            save = true;
+        }
+
+        window.setTimeout(() => {
+            if (!finished.current && customMotion.current !== undefined) {
+                onFinishEditing(save ? tempValue : undefined, customMotion.current);
+                finished.current = true;
             }
-
-            window.setTimeout(() => {
-                if (!finished.current && customMotion.current !== undefined) {
-                    onFinishEditing(save ? tempValue : undefined, customMotion.current);
-                    finished.current = true;
-                }
-            }, 0);
-        },
-        [onFinishEditing, tempValue]
-    );
+        }, 0);
+    });
 
     const targetValue = tempValue ?? content;
 

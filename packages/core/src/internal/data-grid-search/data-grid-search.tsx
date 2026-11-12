@@ -10,6 +10,7 @@ import {
 import ScrollingDataGrid, { type ScrollingDataGridProps } from "../scrolling-data-grid/scrolling-data-grid.js";
 import { SearchWrapper } from "./data-grid-search-style.js";
 import { assert } from "../../common/support.js";
+import { useStableCallback } from "../../common/use-stable-callback.js";
 
 // icons
 const upArrow = (
@@ -90,6 +91,33 @@ export interface DataGridSearchProps extends Omit<ScrollingDataGridProps, "preli
 
 const targetSearchTimeMS = 10;
 
+// The functions below are module level so that they hold their arguments and nothing from a render.
+function cancelEvent(ev: React.MouseEvent) {
+    ev.stopPropagation();
+}
+
+function makeCancelSearch(
+    searchHandle: React.MutableRefObject<number | undefined>,
+    abortControllerRef: React.MutableRefObject<AbortController>
+): () => void {
+    return () => {
+        if (searchHandle.current !== undefined) {
+            window.cancelAnimationFrame(searchHandle.current);
+            searchHandle.current = undefined;
+        }
+        // Always abort and replace the controller to ensure a fresh, non-aborted signal
+        if (abortControllerRef.current !== undefined) {
+            abortControllerRef.current.abort();
+        }
+        abortControllerRef.current = new AbortController();
+    };
+}
+
+function clearAnimatingOutLater(setIsAnimatingOut: (value: boolean) => void): () => void {
+    const timeoutId = setTimeout(setIsAnimatingOut, 150, false);
+    return () => clearTimeout(timeoutId);
+}
+
 const DataGridSearch: React.FunctionComponent<DataGridSearchProps> = p => {
     const {
         canvasRef,
@@ -112,13 +140,10 @@ const DataGridSearch: React.FunctionComponent<DataGridSearchProps> = p => {
     const searchString = searchValue ?? searchStringInner;
 
     // always emit both, this allows the user to spy on the search value without controlling it.
-    const setSearchString = React.useCallback(
-        (newVal: string) => {
-            setSearchStringInner(newVal);
-            onSearchValueChange?.(newVal);
-        },
-        [onSearchValueChange]
-    );
+    const setSearchString = (newVal: string) => {
+        setSearchStringInner(newVal);
+        onSearchValueChange?.(newVal);
+    };
 
     const [searchStatus, setSearchStatus] = React.useState<{
         rowsSearched: number;
@@ -148,154 +173,138 @@ const DataGridSearch: React.FunctionComponent<DataGridSearchProps> = p => {
     const [searchResultsInner, setSearchResultsInner] = React.useState<readonly Item[]>([]);
     const searchResults = searchResultsIn ?? searchResultsInner;
 
-    const cancelSearch = React.useCallback(() => {
-        if (searchHandle.current !== undefined) {
-            window.cancelAnimationFrame(searchHandle.current);
-            searchHandle.current = undefined;
-        }
-        // Always abort and replace the controller to ensure a fresh, non-aborted signal
-        if (abortControllerRef.current !== undefined) {
-            abortControllerRef.current.abort();
-        }
-        abortControllerRef.current = new AbortController();
-    }, []);
+    const [cancelSearch] = React.useState(() => makeCancelSearch(searchHandle, abortControllerRef));
 
     const cellYOffsetRef = React.useRef(cellYOffset);
     cellYOffsetRef.current = cellYOffset;
-    const beginSearch = React.useCallback(
-        (str: string) => {
-            const regex = new RegExp(str.replace(/([$()*+.?[\\\]^{|}-])/g, "\\$1"), "i");
+    const beginSearch = (str: string) => {
+        const regex = new RegExp(str.replace(/([$()*+.?[\\\]^{|}-])/g, "\\$1"), "i");
 
-            let startY = cellYOffsetRef.current;
+        let startY = cellYOffsetRef.current;
 
-            // Lets assume we can do 10 rows at a time
-            // This is usually very safe and limits the damage for bad
-            // performing sheets.
-            let searchStride = Math.min(10, rows);
+        // Lets assume we can do 10 rows at a time
+        // This is usually very safe and limits the damage for bad
+        // performing sheets.
+        let searchStride = Math.min(10, rows);
 
-            let rowsSearched = 0;
+        let rowsSearched = 0;
 
-            setSearchStatus(undefined);
-            setSearchResultsInner([]);
+        setSearchStatus(undefined);
+        setSearchResultsInner([]);
 
-            const runningResult: [number, number][] = [];
+        const runningResult: [number, number][] = [];
 
-            const tick = async () => {
-                if (getCellsForSelection === undefined) return;
-                const tStart = performance.now();
-                const rowsLeft = rows - rowsSearched;
-                let data = getCellsForSelection(
-                    {
-                        x: 0,
-                        y: startY,
-                        width: columns.length,
-                        height: Math.min(searchStride, rowsLeft, rows - startY),
-                    },
-                    abortControllerRef.current.signal
-                );
+        const tick = async () => {
+            if (getCellsForSelection === undefined) return;
+            const tStart = performance.now();
+            const rowsLeft = rows - rowsSearched;
+            let data = getCellsForSelection(
+                {
+                    x: 0,
+                    y: startY,
+                    width: columns.length,
+                    height: Math.min(searchStride, rowsLeft, rows - startY),
+                },
+                abortControllerRef.current.signal
+            );
 
-                if (typeof data === "function") {
-                    data = await data();
-                }
+            if (typeof data === "function") {
+                data = await data();
+            }
 
-                let added = false;
-                for (const [row, d] of data.entries()) {
-                    for (const [col, cell] of d.entries()) {
-                        let testString: string | undefined;
-                        switch (cell.kind) {
-                            case GridCellKind.Text:
-                            case GridCellKind.Number:
-                                testString = cell.displayData;
-                                break;
-                            case GridCellKind.Uri:
-                            case GridCellKind.Markdown:
-                                testString = cell.data;
-                                break;
-                            case GridCellKind.Boolean:
-                                testString = typeof cell.data === "boolean" ? cell.data.toString() : undefined;
-                                break;
-                            case GridCellKind.Image:
-                            case GridCellKind.Bubble:
-                                // I know its lazy, but unless someone is actually
-                                // searching for the whale emoji, this is pretty side effect
-                                // free. And ya know... it's nice and easy to do...
-                                testString = cell.data.join("🐳");
-                                break;
-                            case GridCellKind.Custom:
-                                testString = cell.copyData;
-                                break;
-                        }
+            let added = false;
+            for (const [row, d] of data.entries()) {
+                for (const [col, cell] of d.entries()) {
+                    let testString: string | undefined;
+                    switch (cell.kind) {
+                        case GridCellKind.Text:
+                        case GridCellKind.Number:
+                            testString = cell.displayData;
+                            break;
+                        case GridCellKind.Uri:
+                        case GridCellKind.Markdown:
+                            testString = cell.data;
+                            break;
+                        case GridCellKind.Boolean:
+                            testString = typeof cell.data === "boolean" ? cell.data.toString() : undefined;
+                            break;
+                        case GridCellKind.Image:
+                        case GridCellKind.Bubble:
+                            // I know its lazy, but unless someone is actually
+                            // searching for the whale emoji, this is pretty side effect
+                            // free. And ya know... it's nice and easy to do...
+                            testString = cell.data.join("🐳");
+                            break;
+                        case GridCellKind.Custom:
+                            testString = cell.copyData;
+                            break;
+                    }
 
-                        if (testString !== undefined && regex.test(testString)) {
-                            runningResult.push([col, row + startY]);
-                            added = true;
-                        }
+                    if (testString !== undefined && regex.test(testString)) {
+                        runningResult.push([col, row + startY]);
+                        added = true;
                     }
                 }
+            }
 
-                const tEnd = performance.now();
+            const tEnd = performance.now();
 
-                if (added) {
-                    setSearchResultsInner([...runningResult]);
-                }
+            if (added) {
+                setSearchResultsInner([...runningResult]);
+            }
 
-                rowsSearched += data.length;
-                assert(rowsSearched <= rows);
+            rowsSearched += data.length;
+            assert(rowsSearched <= rows);
 
-                const selectedIndex = searchStatusRef.current?.selectedIndex ?? -1;
-                setSearchStatus({
-                    results: runningResult.length,
-                    rowsSearched,
-                    selectedIndex,
-                });
-                onSearchResultsChanged?.(runningResult, selectedIndex);
+            const selectedIndex = searchStatusRef.current?.selectedIndex ?? -1;
+            setSearchStatus({
+                results: runningResult.length,
+                rowsSearched,
+                selectedIndex,
+            });
+            onSearchResultsChanged?.(runningResult, selectedIndex);
 
-                if (startY + searchStride >= rows) {
-                    startY = 0;
-                } else {
-                    startY += searchStride;
-                }
+            if (startY + searchStride >= rows) {
+                startY = 0;
+            } else {
+                startY += searchStride;
+            }
 
-                const tElapsed = tEnd - tStart;
-                const rounded = Math.max(tElapsed, 1);
+            const tElapsed = tEnd - tStart;
+            const rounded = Math.max(tElapsed, 1);
 
-                const scalar = targetSearchTimeMS / rounded;
-                searchStride = Math.ceil(searchStride * scalar);
+            const scalar = targetSearchTimeMS / rounded;
+            searchStride = Math.ceil(searchStride * scalar);
 
-                if (rowsSearched < rows && runningResult.length < 1000) {
-                    searchHandle.current = window.requestAnimationFrame(tick);
-                }
-            };
+            if (rowsSearched < rows && runningResult.length < 1000) {
+                searchHandle.current = window.requestAnimationFrame(tick);
+            }
+        };
 
-            cancelSearch();
-            searchHandle.current = window.requestAnimationFrame(tick);
-        },
-        [cancelSearch, columns.length, getCellsForSelection, onSearchResultsChanged, rows]
-    );
+        cancelSearch();
+        searchHandle.current = window.requestAnimationFrame(tick);
+    };
 
-    const onClose = React.useCallback(() => {
+    const onClose = useStableCallback(() => {
         onSearchClose?.();
         setSearchStatus(undefined);
         setSearchResultsInner([]);
         onSearchResultsChanged?.([], -1);
         cancelSearch();
         canvasRef?.current?.focus();
-    }, [cancelSearch, canvasRef, onSearchClose, onSearchResultsChanged]);
+    });
 
-    const onSearchChange = React.useCallback(
-        (event: React.ChangeEvent<HTMLInputElement>) => {
-            setSearchString(event.target.value);
-            if (searchResultsIn !== undefined) return;
-            if (event.target.value === "") {
-                setSearchStatus(undefined);
-                setSearchResultsInner([]);
-                cancelSearch();
-            } else {
-                beginSearch(event.target.value);
-            }
-        },
-        [beginSearch, cancelSearch, setSearchString, searchResultsIn]
-    );
+    const onSearchChange = useStableCallback((event: React.ChangeEvent<HTMLInputElement>) => {
+        setSearchString(event.target.value);
+        if (searchResultsIn !== undefined) return;
+        if (event.target.value === "") {
+            setSearchStatus(undefined);
+            setSearchResultsInner([]);
+            cancelSearch();
+        } else {
+            beginSearch(event.target.value);
+        }
+    });
 
     React.useEffect(() => {
         if (searchInputRef.current === null) return;
@@ -318,58 +327,45 @@ const DataGridSearch: React.FunctionComponent<DataGridSearchProps> = p => {
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [showSearch, searchInputRef]);
 
-    const onNext = React.useCallback(
-        (ev?: React.MouseEvent) => {
-            ev?.stopPropagation?.();
-            if (searchStatus === undefined || searchStatus.results === 0) return;
-            const newIndex = (searchStatus.selectedIndex + 1) % searchStatus.results;
-            setSearchStatus({
-                ...searchStatus,
-                selectedIndex: newIndex,
-            });
-            onSearchResultsChanged?.(searchResults, newIndex);
-        },
-        [searchStatus, onSearchResultsChanged, searchResults]
-    );
+    const onNext = useStableCallback((ev?: React.MouseEvent) => {
+        ev?.stopPropagation?.();
+        if (searchStatus === undefined || searchStatus.results === 0) return;
+        const newIndex = (searchStatus.selectedIndex + 1) % searchStatus.results;
+        setSearchStatus({
+            ...searchStatus,
+            selectedIndex: newIndex,
+        });
+        onSearchResultsChanged?.(searchResults, newIndex);
+    });
 
-    const onPrev = React.useCallback(
-        (ev?: React.MouseEvent) => {
-            ev?.stopPropagation?.();
-            if (searchStatus === undefined || searchStatus.results === 0) return;
-            let newIndex = (searchStatus.selectedIndex - 1) % searchStatus.results;
-            if (newIndex < 0) newIndex += searchStatus.results;
-            setSearchStatus({
-                ...searchStatus,
-                selectedIndex: newIndex,
-            });
-            onSearchResultsChanged?.(searchResults, newIndex);
-        },
-        [onSearchResultsChanged, searchResults, searchStatus]
-    );
+    const onPrev = useStableCallback((ev?: React.MouseEvent) => {
+        ev?.stopPropagation?.();
+        if (searchStatus === undefined || searchStatus.results === 0) return;
+        let newIndex = (searchStatus.selectedIndex - 1) % searchStatus.results;
+        if (newIndex < 0) newIndex += searchStatus.results;
+        setSearchStatus({
+            ...searchStatus,
+            selectedIndex: newIndex,
+        });
+        onSearchResultsChanged?.(searchResults, newIndex);
+    });
 
-    const onSearchKeyDown = React.useCallback(
-        (event: React.KeyboardEvent<HTMLInputElement>) => {
-            if (((event.ctrlKey || event.metaKey) && event.nativeEvent.code === "KeyF") || event.key === "Escape") {
-                onClose();
-                event.stopPropagation();
-                event.preventDefault();
-            } else if (event.key === "Enter") {
-                if (event.shiftKey) {
-                    onPrev();
-                } else {
-                    onNext();
-                }
+    const onSearchKeyDown = useStableCallback((event: React.KeyboardEvent<HTMLInputElement>) => {
+        if (((event.ctrlKey || event.metaKey) && event.nativeEvent.code === "KeyF") || event.key === "Escape") {
+            onClose();
+            event.stopPropagation();
+            event.preventDefault();
+        } else if (event.key === "Enter") {
+            if (event.shiftKey) {
+                onPrev();
+            } else {
+                onNext();
             }
-        },
-        [onClose, onNext, onPrev]
-    );
+        }
+    });
 
     // cancel search if the component is unmounted
-    React.useEffect(() => {
-        return () => {
-            cancelSearch();
-        };
-    }, [cancelSearch]);
+    React.useEffect(() => cancelSearch, [cancelSearch]);
 
     const [isAnimatingOut, setIsAnimatingOut] = React.useState(false);
 
@@ -377,8 +373,7 @@ const DataGridSearch: React.FunctionComponent<DataGridSearchProps> = p => {
         if (showSearch) {
             setIsAnimatingOut(true);
         } else {
-            const timeoutId = setTimeout(() => setIsAnimatingOut(false), 150);
-            return () => clearTimeout(timeoutId);
+            return clearAnimatingOutLater(setIsAnimatingOut);
         }
     }, [showSearch]);
 
@@ -397,10 +392,6 @@ const DataGridSearch: React.FunctionComponent<DataGridSearchProps> = p => {
                 resultString = `${searchStatus.selectedIndex + 1} of ${resultString}`;
             }
         }
-
-        const cancelEvent = (ev: React.MouseEvent) => {
-            ev.stopPropagation();
-        };
 
         const rowsSearchedProgress = rows > 0 ? Math.floor(((searchStatus?.rowsSearched ?? 0) / rows) * 100) : 0;
         const progressStyle: React.CSSProperties = {

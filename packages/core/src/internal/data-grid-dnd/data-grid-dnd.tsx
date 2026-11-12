@@ -4,6 +4,7 @@ import * as React from "react";
 import DataGrid, { type DataGridProps, type DataGridRef } from "../data-grid/data-grid.js";
 import type { GridColumn, InnerGridColumn, Rectangle } from "../data-grid/data-grid-types.js";
 import type { GridMouseEventArgs } from "../data-grid/event-args.js";
+import { useStableCallback } from "../../common/use-stable-callback.js";
 
 type Props = Omit<
     DataGridProps,
@@ -85,6 +86,28 @@ function offsetColumnSize(column: InnerGridColumn, width: number, min: number, m
     return clamp(Math.round(width - (column.growOffset ?? 0)), Math.ceil(min), Math.floor(max));
 }
 
+// Module level so that the returned function holds its arguments and nothing from a render.
+function reorderRows(
+    getCellContent: DataGridDndProps["getCellContent"],
+    dragRow: number | undefined,
+    dropRow: number | undefined
+): DataGridDndProps["getCellContent"] {
+    return (cell, forceStrict) => {
+        if (dragRow === undefined || dropRow === undefined) return getCellContent(cell, forceStrict);
+
+        // eslint-disable-next-line prefer-const
+        let [col, row] = cell;
+        if (row === dropRow) {
+            row = dragRow;
+        } else {
+            if (row > dropRow) row -= 1;
+            if (row >= dragRow) row += 1;
+        }
+
+        return getCellContent([col, row], forceStrict);
+    };
+}
+
 const DataGridDnd: React.FunctionComponent<DataGridDndProps> = p => {
     const [resizeColStartX, setResizeColStartX] = React.useState<number>();
     const [resizeCol, setResizeCol] = React.useState<number>();
@@ -125,82 +148,70 @@ const DataGridDnd: React.FunctionComponent<DataGridDndProps> = p => {
     const { columns, selection } = p;
     const selectedColumns = selection.columns;
 
-    const onItemHoveredImpl = React.useCallback(
-        (args: GridMouseEventArgs) => {
-            const [col, row] = args.location;
-            if (dragCol !== undefined && dropCol !== col && col >= lockColumns) {
-                setDragColActive(true);
-                setDropCol(col);
-            } else if (dragRow !== undefined && row !== undefined) {
-                setDragRowActive(true);
-                setDropRow(Math.max(0, row));
-                // Don't emit onItemHovered if resizing or reordering a column or row.
-            } else if (resizeCol === undefined && !dragColActive && !dragRowActive) {
-                onItemHovered?.(args);
-            }
-        },
-        [dragCol, dragRow, dropCol, onItemHovered, lockColumns, resizeCol, dragColActive, dragRowActive]
-    );
+    const onItemHoveredImpl = useStableCallback((args: GridMouseEventArgs) => {
+        const [col, row] = args.location;
+        if (dragCol !== undefined && dropCol !== col && col >= lockColumns) {
+            setDragColActive(true);
+            setDropCol(col);
+        } else if (dragRow !== undefined && row !== undefined) {
+            setDragRowActive(true);
+            setDropRow(Math.max(0, row));
+            // Don't emit onItemHovered if resizing or reordering a column or row.
+        } else if (resizeCol === undefined && !dragColActive && !dragRowActive) {
+            onItemHovered?.(args);
+        }
+    });
 
     const canDragCol = onColumnMoved !== undefined;
-    const onMouseDownImpl = React.useCallback(
-        (args: GridMouseEventArgs) => {
-            if (args.button === 0) {
-                const [col, row] = args.location;
-                if (args.kind === "out-of-bounds" && args.isEdge && canResize) {
-                    const bounds = gridRef?.current?.getBounds(columns.length - 1, -1);
-                    if (bounds !== undefined) {
-                        setResizeColStartX(bounds.x);
-                        setResizeCol(columns.length - 1);
-                    }
-                } else if (args.kind === "header" && col >= lockColumns) {
-                    const canvas = canvasRef?.current;
-                    if (args.isEdge && canResize && canvas) {
-                        setResizeColStartX(args.bounds.x);
-                        setResizeCol(col);
-                        const rect = canvas.getBoundingClientRect();
-                        const scale = rect.width / canvas.offsetWidth;
-                        const width = args.bounds.width / scale;
-                        onColumnResizeStart?.(columns[col], width, col, width + (columns[col].growOffset ?? 0));
-                    } else if (args.kind === "header" && canDragCol) {
-                        setDragStartX(args.bounds.x);
-                        setDragCol(col);
-                    }
-                } else if (
-                    args.kind === "cell" &&
-                    lockColumns > 0 &&
-                    col === 0 &&
-                    row !== undefined &&
-                    onRowMoved !== undefined
-                ) {
-                    setDragStartY(args.bounds.y);
-                    setDragRow(row);
+    const onMouseDownImpl = useStableCallback((args: GridMouseEventArgs) => {
+        if (args.button === 0) {
+            const [col, row] = args.location;
+            if (args.kind === "out-of-bounds" && args.isEdge && canResize) {
+                const bounds = gridRef?.current?.getBounds(columns.length - 1, -1);
+                if (bounds !== undefined) {
+                    setResizeColStartX(bounds.x);
+                    setResizeCol(columns.length - 1);
                 }
+            } else if (args.kind === "header" && col >= lockColumns) {
+                const canvas = canvasRef?.current;
+                if (args.isEdge && canResize && canvas) {
+                    setResizeColStartX(args.bounds.x);
+                    setResizeCol(col);
+                    const rect = canvas.getBoundingClientRect();
+                    const scale = rect.width / canvas.offsetWidth;
+                    const width = args.bounds.width / scale;
+                    onColumnResizeStart?.(columns[col], width, col, width + (columns[col].growOffset ?? 0));
+                } else if (args.kind === "header" && canDragCol) {
+                    setDragStartX(args.bounds.x);
+                    setDragCol(col);
+                }
+            } else if (
+                args.kind === "cell" &&
+                lockColumns > 0 &&
+                col === 0 &&
+                row !== undefined &&
+                onRowMoved !== undefined
+            ) {
+                setDragStartY(args.bounds.y);
+                setDragRow(row);
             }
-            onMouseDown?.(args);
-        },
-        [onMouseDown, canResize, lockColumns, onRowMoved, gridRef, columns, canDragCol, onColumnResizeStart, canvasRef]
-    );
+        }
+        onMouseDown?.(args);
+    });
 
-    const onHeaderMenuClickMangled = React.useCallback(
-        (col: number, screenPosition: Rectangle) => {
-            if (dragColActive || dragRowActive) return;
-            onHeaderMenuClick?.(col, screenPosition);
-        },
-        [dragColActive, dragRowActive, onHeaderMenuClick]
-    );
+    const onHeaderMenuClickMangled = useStableCallback((col: number, screenPosition: Rectangle) => {
+        if (dragColActive || dragRowActive) return;
+        onHeaderMenuClick?.(col, screenPosition);
+    });
 
-    const onHeaderIndicatorClickMangled = React.useCallback(
-        (col: number, screenPosition: Rectangle) => {
-            if (dragColActive || dragRowActive) return;
-            onHeaderIndicatorClick?.(col, screenPosition);
-        },
-        [dragColActive, dragRowActive, onHeaderIndicatorClick]
-    );
+    const onHeaderIndicatorClickMangled = useStableCallback((col: number, screenPosition: Rectangle) => {
+        if (dragColActive || dragRowActive) return;
+        onHeaderIndicatorClick?.(col, screenPosition);
+    });
 
     const lastResizeWidthRef = React.useRef(-1);
 
-    const clearAll = React.useCallback(() => {
+    const clearAll = () => {
         lastResizeWidthRef.current = -1;
         setDragRow(undefined);
         setDropRow(undefined);
@@ -212,74 +223,54 @@ const DataGridDnd: React.FunctionComponent<DataGridDndProps> = p => {
         setDragColActive(false);
         setResizeCol(undefined);
         setResizeColStartX(undefined);
-    }, []);
+    };
 
-    const onMouseUpImpl = React.useCallback(
-        (args: GridMouseEventArgs, isOutside: boolean) => {
-            if (args.button === 0) {
-                if (resizeCol !== undefined) {
-                    // if the column is in selection, the selection may contain extra cols, so lets just re-send the last
-                    // resize event to all those columns.
-                    if (selectedColumns?.hasIndex(resizeCol) === true) {
-                        for (const c of selectedColumns) {
-                            if (c === resizeCol) continue;
-                            const col = columns[c];
-                            const newSize = offsetColumnSize(
-                                col,
-                                lastResizeWidthRef.current,
-                                minColumnWidth,
-                                maxColumnWidth
-                            );
-                            onColumnResize?.(col, newSize, c, newSize + (col.growOffset ?? 0));
-                        }
-                    }
-
-                    const ns = offsetColumnSize(
-                        columns[resizeCol],
-                        lastResizeWidthRef.current,
-                        minColumnWidth,
-                        maxColumnWidth
-                    );
-                    onColumnResizeEnd?.(columns[resizeCol], ns, resizeCol, ns + (columns[resizeCol].growOffset ?? 0));
-                    if (selectedColumns.hasIndex(resizeCol)) {
-                        for (const c of selectedColumns) {
-                            if (c === resizeCol) continue;
-                            const col = columns[c];
-                            const s = offsetColumnSize(col, lastResizeWidthRef.current, minColumnWidth, maxColumnWidth);
-                            onColumnResizeEnd?.(col, s, c, s + (col.growOffset ?? 0));
-                        }
+    const onMouseUpImpl = useStableCallback((args: GridMouseEventArgs, isOutside: boolean) => {
+        if (args.button === 0) {
+            if (resizeCol !== undefined) {
+                // if the column is in selection, the selection may contain extra cols, so lets just re-send the last
+                // resize event to all those columns.
+                if (selectedColumns?.hasIndex(resizeCol) === true) {
+                    for (const c of selectedColumns) {
+                        if (c === resizeCol) continue;
+                        const col = columns[c];
+                        const newSize = offsetColumnSize(
+                            col,
+                            lastResizeWidthRef.current,
+                            minColumnWidth,
+                            maxColumnWidth
+                        );
+                        onColumnResize?.(col, newSize, c, newSize + (col.growOffset ?? 0));
                     }
                 }
 
-                clearAll();
-                if (dragCol !== undefined && dropCol !== undefined && onColumnProposeMove?.(dragCol, dropCol) !== false) {
-                    onColumnMoved?.(dragCol, dropCol);
-                }
-                if (dragRow !== undefined && dropRow !== undefined) {
-                    onRowMoved?.(dragRow, dropRow);
+                const ns = offsetColumnSize(
+                    columns[resizeCol],
+                    lastResizeWidthRef.current,
+                    minColumnWidth,
+                    maxColumnWidth
+                );
+                onColumnResizeEnd?.(columns[resizeCol], ns, resizeCol, ns + (columns[resizeCol].growOffset ?? 0));
+                if (selectedColumns.hasIndex(resizeCol)) {
+                    for (const c of selectedColumns) {
+                        if (c === resizeCol) continue;
+                        const col = columns[c];
+                        const s = offsetColumnSize(col, lastResizeWidthRef.current, minColumnWidth, maxColumnWidth);
+                        onColumnResizeEnd?.(col, s, c, s + (col.growOffset ?? 0));
+                    }
                 }
             }
-            onMouseUp?.(args, isOutside);
-        },
-        [
-            onMouseUp,
-            resizeCol,
-            dragCol,
-            dropCol,
-            dragRow,
-            dropRow,
-            selectedColumns,
-            onColumnResizeEnd,
-            columns,
-            minColumnWidth,
-            maxColumnWidth,
-            onColumnResize,
-            onColumnMoved,
-            onRowMoved,
-            clearAll,
-            onColumnProposeMove,
-        ]
-    );
+
+            clearAll();
+            if (dragCol !== undefined && dropCol !== undefined && onColumnProposeMove?.(dragCol, dropCol) !== false) {
+                onColumnMoved?.(dragCol, dropCol);
+            }
+            if (dragRow !== undefined && dropRow !== undefined) {
+                onRowMoved?.(dragRow, dropRow);
+            }
+        }
+        onMouseUp?.(args, isOutside);
+    });
 
     const dragOffset = React.useMemo(() => {
         if (dragCol === undefined || dropCol === undefined) return undefined;
@@ -293,81 +284,49 @@ const DataGridDnd: React.FunctionComponent<DataGridDndProps> = p => {
         };
     }, [dragCol, dropCol, onColumnProposeMove]);
 
-    const onMouseMove = React.useCallback(
-        (event: MouseEvent) => {
-            const canvas = canvasRef?.current;
-            if (dragCol !== undefined && dragStartX !== undefined) {
-                const diff = Math.abs(event.clientX - dragStartX);
-                if (diff > 20) {
-                    setDragColActive(true);
-                }
-            } else if (dragRow !== undefined && dragStartY !== undefined) {
-                const diff = Math.abs(event.clientY - dragStartY);
-                if (diff > 20) {
-                    setDragRowActive(true);
-                }
-            } else if (resizeCol !== undefined && resizeColStartX !== undefined && canvas) {
-                const rect = canvas.getBoundingClientRect();
-                const scale = rect.width / canvas.offsetWidth;
-                const newWidth = (event.clientX - resizeColStartX) / scale;
-                const column = columns[resizeCol];
-                const ns = offsetColumnSize(column, newWidth, minColumnWidth, maxColumnWidth);
-                onColumnResize?.(column, ns, resizeCol, ns + (column.growOffset ?? 0));
-                lastResizeWidthRef.current = newWidth;
+    const onMouseMove = useStableCallback((event: MouseEvent) => {
+        const canvas = canvasRef?.current;
+        if (dragCol !== undefined && dragStartX !== undefined) {
+            const diff = Math.abs(event.clientX - dragStartX);
+            if (diff > 20) {
+                setDragColActive(true);
+            }
+        } else if (dragRow !== undefined && dragStartY !== undefined) {
+            const diff = Math.abs(event.clientY - dragStartY);
+            if (diff > 20) {
+                setDragRowActive(true);
+            }
+        } else if (resizeCol !== undefined && resizeColStartX !== undefined && canvas) {
+            const rect = canvas.getBoundingClientRect();
+            const scale = rect.width / canvas.offsetWidth;
+            const newWidth = (event.clientX - resizeColStartX) / scale;
+            const column = columns[resizeCol];
+            const ns = offsetColumnSize(column, newWidth, minColumnWidth, maxColumnWidth);
+            onColumnResize?.(column, ns, resizeCol, ns + (column.growOffset ?? 0));
+            lastResizeWidthRef.current = newWidth;
 
-                if (selectedColumns?.first() === resizeCol) {
-                    for (const c of selectedColumns) {
-                        if (c === resizeCol) continue;
-                        const col = columns[c];
-                        const s = offsetColumnSize(col, lastResizeWidthRef.current, minColumnWidth, maxColumnWidth);
-                        onColumnResize?.(col, s, c, s + (col.growOffset ?? 0));
-                    }
+            if (selectedColumns?.first() === resizeCol) {
+                for (const c of selectedColumns) {
+                    if (c === resizeCol) continue;
+                    const col = columns[c];
+                    const s = offsetColumnSize(col, lastResizeWidthRef.current, minColumnWidth, maxColumnWidth);
+                    onColumnResize?.(col, s, c, s + (col.growOffset ?? 0));
                 }
             }
-        },
-        [
-            dragCol,
-            dragStartX,
-            dragRow,
-            dragStartY,
-            resizeCol,
-            resizeColStartX,
-            columns,
-            minColumnWidth,
-            maxColumnWidth,
-            onColumnResize,
-            selectedColumns,
-            canvasRef,
-        ]
-    );
+        }
+    });
 
-    const getMangledCellContent = React.useCallback<typeof getCellContent>(
-        (cell, forceStrict) => {
-            if (dragRow === undefined || dropRow === undefined) return getCellContent(cell, forceStrict);
-
-            // eslint-disable-next-line prefer-const
-            let [col, row] = cell;
-            if (row === dropRow) {
-                row = dragRow;
-            } else {
-                if (row > dropRow) row -= 1;
-                if (row >= dragRow) row += 1;
-            }
-
-            return getCellContent([col, row], forceStrict);
-        },
+    const getMangledCellContent = React.useMemo(
+        () => reorderRows(getCellContent, dragRow, dropRow),
         [dragRow, dropRow, getCellContent]
     );
 
-    const onDragStartImpl = React.useCallback<NonNullable<DataGridDndProps["onDragStart"]>>(
-        args => {
-            onDragStart?.(args);
-            if (!args.defaultPrevented()) {
-                clearAll();
-            }
-        },
-        [clearAll, onDragStart]
-    );
+    const onDragStartImpl = useStableCallback<NonNullable<DataGridDndProps["onDragStart"]>>(args => {
+        onDragStart?.(args);
+        if (!args.defaultPrevented()) {
+            clearAll();
+        }
+    });
 
     return (
         <DataGrid

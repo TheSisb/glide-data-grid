@@ -33,13 +33,14 @@ import clamp from "lodash/clamp.js";
 import makeRange from "lodash/range.js";
 import { drawGrid } from "./render/data-grid-render.js";
 import { type BlitData } from "./render/data-grid-render.blit.js";
-import { AnimationManager, type StepCallback } from "./animation-manager.js";
+import { AnimationManager, type HoverValues, type StepCallback } from "./animation-manager.js";
 import { RenderStateProvider, packColRowToNumber } from "../../common/render-state-provider.js";
 import { browserIsFirefox, browserIsSafari } from "../../common/browser-detect.js";
 import { type EnqueueCallback, useAnimationQueue } from "./use-animation-queue.js";
+import { useLatest, useStableCallback } from "../../common/use-stable-callback.js";
 import { assert } from "../../common/support.js";
 import type { CellRenderer, GetCellRendererCallback } from "../../cells/cell-types.js";
-import type { DrawGridArg } from "./render/draw-grid-arg.js";
+import type { DrawGridArg, HoverInfo } from "./render/draw-grid-arg.js";
 import type { ImageWindowLoader } from "./image-window-loader-interface.js";
 import {
     type GridMouseEventArgs,
@@ -333,6 +334,218 @@ const getRowData = (cell: InnerGridCell, getCellRenderer?: GetCellRendererCallba
     return r?.getAccessibilityString(cell) ?? "";
 };
 
+// The functions below are module level so that what they return holds its arguments and nothing from a render of
+// DataGrid. A function created in the render body keeps that whole render alive for as long as it is referenced.
+
+function noop() {
+    // do nothing
+}
+
+const defaultGetGroupDetails: GroupDetailsCallback = name => ({ name });
+
+function makeFullRedraw(
+    lastArgsRef: React.MutableRefObject<DrawGridArg | undefined>,
+    lastDrawRef: React.MutableRefObject<() => void>
+): () => void {
+    return () => {
+        lastArgsRef.current = undefined;
+        lastDrawRef.current();
+    };
+}
+
+function attachBuffers(
+    bufferACtx: CanvasRenderingContext2D | null,
+    bufferBCtx: CanvasRenderingContext2D | null
+): (() => void) | undefined {
+    if (bufferACtx === null || bufferBCtx === null) return undefined;
+    document.documentElement.append(bufferACtx.canvas);
+    document.documentElement.append(bufferBCtx.canvas);
+    return () => {
+        bufferACtx.canvas.remove();
+        bufferBCtx.canvas.remove();
+    };
+}
+
+type DrawInputs = Omit<
+    DrawGridArg,
+    "canvasCtx" | "headerCanvasCtx" | "overrideCursor" | "damage" | "hoverValues" | "hoverInfo" | "enqueue"
+>;
+
+function makeDraw(
+    inputs: DrawInputs | undefined,
+    refs: {
+        readonly canvasRef: React.MutableRefObject<HTMLCanvasElement | null>;
+        readonly overlayRef: React.MutableRefObject<HTMLCanvasElement | null>;
+        readonly canvasCtx: React.MutableRefObject<CanvasRenderingContext2D | null>;
+        readonly overlayCtx: React.MutableRefObject<CanvasRenderingContext2D | null>;
+        readonly lastArgsRef: React.MutableRefObject<DrawGridArg | undefined>;
+        readonly damageRegion: React.MutableRefObject<CellSet | undefined>;
+        readonly hoverValues: React.MutableRefObject<HoverValues>;
+        readonly hoverInfoRef: React.MutableRefObject<HoverInfo | undefined>;
+        readonly enqueueRef: React.MutableRefObject<EnqueueCallback>;
+        readonly setDrawCursorOverride: (cursor: React.CSSProperties["cursor"] | undefined) => void;
+    }
+): () => void {
+    const {
+        canvasRef,
+        overlayRef,
+        canvasCtx,
+        overlayCtx,
+        lastArgsRef,
+        damageRegion,
+        hoverValues,
+        hoverInfoRef,
+        enqueueRef,
+        setDrawCursorOverride,
+    } = refs;
+    return () => {
+        const canvas = canvasRef.current;
+        const overlay = overlayRef.current;
+        if (canvas === null || overlay === null) return;
+
+        if (canvasCtx.current === null) {
+            canvasCtx.current = canvas.getContext("2d", { alpha: false });
+            canvas.width = 0;
+            canvas.height = 0;
+        }
+
+        if (overlayCtx.current === null) {
+            overlayCtx.current = overlay.getContext("2d", { alpha: false });
+            overlay.width = 0;
+            overlay.height = 0;
+        }
+
+        if (canvasCtx.current === null || overlayCtx.current === null || inputs === undefined) {
+            return;
+        }
+
+        let didOverride = false;
+        const overrideCursor = (cursor: React.CSSProperties["cursor"]) => {
+            didOverride = true;
+            setDrawCursorOverride(cursor);
+        };
+
+        const last = lastArgsRef.current;
+        const current: DrawGridArg = {
+            ...inputs,
+            headerCanvasCtx: overlayCtx.current,
+            canvasCtx: canvasCtx.current,
+            overrideCursor,
+            damage: damageRegion.current,
+            hoverValues: hoverValues.current,
+            hoverInfo: hoverInfoRef.current,
+            enqueue: enqueueRef.current,
+        };
+
+        // This confusing bit of code due to some poor design. Long story short, the damage property is only used
+        // with what is effectively the "last args" for the last normal draw anyway. We don't want the drawing code
+        // to look at this and go "shit dawg, nothing changed" so we force it to draw frash, but the damage restricts
+        // the draw anyway.
+        //
+        // Dear future Jason, I'm sorry. It was expedient, it worked, and had almost zero perf overhead. THe universe
+        // basically made me do it. What choice did I have?
+        if (current.damage === undefined) {
+            lastArgsRef.current = current;
+            drawGrid(current, last);
+        } else {
+            drawGrid(current, undefined);
+        }
+
+        // don't reset on damage events
+        if (!didOverride && (current.damage === undefined || current.damage.has(hoverInfoRef?.current?.[0]))) {
+            setDrawCursorOverride(undefined);
+        }
+    };
+}
+
+function makeDamageInternal(
+    damageRegion: React.MutableRefObject<CellSet | undefined>,
+    lastDrawRef: React.MutableRefObject<() => void>
+): (locations: CellSet) => void {
+    return locations => {
+        damageRegion.current = locations;
+        lastDrawRef.current();
+        damageRegion.current = undefined;
+    };
+}
+
+function makeOnAnimationFrame(
+    damageRegion: React.MutableRefObject<CellSet | undefined>,
+    hoverValues: React.MutableRefObject<HoverValues>,
+    lastDrawRef: React.MutableRefObject<() => void>
+): StepCallback {
+    return values => {
+        damageRegion.current = new CellSet(values.map(x => x.item));
+        hoverValues.current = values;
+        lastDrawRef.current();
+        damageRegion.current = undefined;
+    };
+}
+
+function makeCanvasRef(
+    ref: React.MutableRefObject<HTMLCanvasElement | null>,
+    canvasRef: React.MutableRefObject<HTMLCanvasElement | null> | undefined,
+    windowEventTargetRef: React.MutableRefObject<HTMLElement | Window | Document>,
+    eventTarget: HTMLElement | Window | Document | undefined
+): (instance: HTMLCanvasElement | null) => void {
+    return instance => {
+        ref.current = instance;
+        if (canvasRef !== undefined) {
+            canvasRef.current = instance;
+        }
+
+        if (eventTarget) {
+            windowEventTargetRef.current = eventTarget;
+        } else if (instance === null) {
+            windowEventTargetRef.current = window;
+        } else {
+            const docRoot = instance.getRootNode();
+
+            if (docRoot === document) windowEventTargetRef.current = window;
+            windowEventTargetRef.current = docRoot as any;
+        }
+    };
+}
+
+function makeFocusElement(
+    ref: React.MutableRefObject<HTMLCanvasElement | null>,
+    canvasRef: React.MutableRefObject<HTMLCanvasElement | null> | undefined,
+    selectionRef: React.MutableRefObject<GridSelection>,
+    focusRef: React.MutableRefObject<HTMLElement | null>
+): (el: HTMLElement | null) => void {
+    return el => {
+        // We don't want to steal the focus if we don't currently own the focus.
+        if (ref.current === null || !ref.current.contains(document.activeElement)) return;
+        if (el === null && selectionRef.current.current !== undefined) {
+            canvasRef?.current?.focus({
+                preventScroll: true,
+            });
+        } else if (el !== null) {
+            el.focus({
+                preventScroll: true,
+            });
+        }
+        focusRef.current = el;
+    };
+}
+
+function forwardDataGridRef(latest: React.MutableRefObject<DataGridRef>): DataGridRef {
+    return {
+        focus: () => latest.current.focus(),
+        getBounds: (col, row) => latest.current.getBounds(col, row),
+        damage: cells => latest.current.damage(cells),
+        getMouseArgsForPosition: (posX, posY, ev) => latest.current.getMouseArgsForPosition(posX, posY, ev),
+    };
+}
+
+function bindClick<T>(handler: (value: T) => void, value: T): () => void {
+    return () => handler(value);
+}
+
+function bindFocus<T>(handler: (target: EventTarget, value: T) => void, value: T): (e: React.FocusEvent) => void {
+    return e => handler(e.target, value);
+}
+
 const DataGrid: React.ForwardRefRenderFunction<DataGridRef, DataGridProps> = (p, forwardedRef) => {
     const {
         width,
@@ -423,12 +636,11 @@ const DataGrid: React.ForwardRefRenderFunction<DataGridRef, DataGridProps> = (p,
     const lastWasTouchRef = React.useRef(lastWasTouch);
     lastWasTouchRef.current = lastWasTouch;
 
+    const lastArgsRef = React.useRef<DrawGridArg>();
+    // Holds the draw function of the last layout pass.
+    const lastDrawRef = React.useRef<() => void>(noop);
     const spriteManager = React.useMemo(
-        () =>
-            new SpriteManager(headerIcons, () => {
-                lastArgsRef.current = undefined;
-                lastDrawRef.current();
-            }),
+        () => new SpriteManager(headerIcons, makeFullRedraw(lastArgsRef, lastDrawRef)),
         [headerIcons]
     );
     const totalHeaderHeight = enableGroups ? groupHeaderHeight + headerHeight : headerHeight;
@@ -456,47 +668,18 @@ const DataGrid: React.ForwardRefRenderFunction<DataGridRef, DataGridProps> = (p,
     );
 
     // row: -1 === columnHeader, -2 === groupHeader
-    const getBoundsForItem = React.useCallback(
-        (canvas: HTMLCanvasElement, col: number, row: number): Rectangle | undefined => {
-            const rect = canvas.getBoundingClientRect();
+    const getBoundsForItem = (canvas: HTMLCanvasElement, col: number, row: number): Rectangle | undefined => {
+        const rect = canvas.getBoundingClientRect();
 
-            if (col >= mappedColumns.length || row >= rows) {
-                return undefined;
-            }
+        if (col >= mappedColumns.length || row >= rows) {
+            return undefined;
+        }
 
-            const scale = rect.width / width;
+        const scale = rect.width / width;
 
-            const result = computeBounds(
-                col,
-                row,
-                width,
-                height,
-                groupHeaderHeight,
-                totalHeaderHeight,
-                cellXOffset,
-                cellYOffset,
-                translateX,
-                translateY,
-                rows,
-                freezeColumns,
-                freezeTrailingRows,
-                mappedColumns,
-                rowHeight
-            );
-
-            if (scale !== 1) {
-                result.x *= scale;
-                result.y *= scale;
-                result.width *= scale;
-                result.height *= scale;
-            }
-
-            result.x += rect.x;
-            result.y += rect.y;
-
-            return result;
-        },
-        [
+        const result = computeBounds(
+            col,
+            row,
             width,
             height,
             groupHeaderHeight,
@@ -509,178 +692,145 @@ const DataGrid: React.ForwardRefRenderFunction<DataGridRef, DataGridProps> = (p,
             freezeColumns,
             freezeTrailingRows,
             mappedColumns,
+            rowHeight
+        );
+
+        if (scale !== 1) {
+            result.x *= scale;
+            result.y *= scale;
+            result.width *= scale;
+            result.height *= scale;
+        }
+
+        result.x += rect.x;
+        result.y += rect.y;
+
+        return result;
+    };
+
+    const getMouseArgsForPosition = (
+        canvas: HTMLCanvasElement,
+        posX: number,
+        posY: number,
+        ev?: MouseEvent | TouchEvent
+    ): GridMouseEventArgs => {
+        const rect = canvas.getBoundingClientRect();
+        const scale = rect.width / width;
+        const x = (posX - rect.left) / scale;
+        const y = (posY - rect.top) / scale;
+        const edgeDetectionBuffer = 5;
+
+        const effectiveCols = getEffectiveColumns(mappedColumns, cellXOffset, width, undefined, translateX);
+
+        let button = 0;
+        let buttons = 0;
+        if (ev instanceof MouseEvent) {
+            button = ev.button;
+            buttons = ev.buttons;
+        }
+
+        // -1 === off right edge
+        const col = getColumnIndexForX(x, effectiveCols, translateX);
+
+        // -1: header or above
+        // undefined: offbottom
+        const row = getRowIndexForY(
+            y,
+            height,
+            enableGroups,
+            headerHeight,
+            groupHeaderHeight,
+            rows,
             rowHeight,
-        ]
-    );
+            cellYOffset,
+            translateY,
+            freezeTrailingRows
+        );
 
-    const getMouseArgsForPosition = React.useCallback(
-        (canvas: HTMLCanvasElement, posX: number, posY: number, ev?: MouseEvent | TouchEvent): GridMouseEventArgs => {
-            const rect = canvas.getBoundingClientRect();
-            const scale = rect.width / width;
-            const x = (posX - rect.left) / scale;
-            const y = (posY - rect.top) / scale;
-            const edgeDetectionBuffer = 5;
+        const shiftKey = ev?.shiftKey === true;
+        const ctrlKey = ev?.ctrlKey === true;
+        const metaKey = ev?.metaKey === true;
+        const isTouch = (ev !== undefined && !(ev instanceof MouseEvent)) || (ev as any)?.pointerType === "touch";
 
-            const effectiveCols = getEffectiveColumns(mappedColumns, cellXOffset, width, undefined, translateX);
+        const scrollEdge: GridMouseEventArgs["scrollEdge"] = [
+            x < 0 ? -1 : width < x ? 1 : 0,
+            y < totalHeaderHeight ? -1 : height < y ? 1 : 0,
+        ];
 
-            let button = 0;
-            let buttons = 0;
-            if (ev instanceof MouseEvent) {
-                button = ev.button;
-                buttons = ev.buttons;
+        let result: GridMouseEventArgs;
+        if (col === -1 || y < 0 || x < 0 || row === undefined || x > width || y > height) {
+            const horizontal = x > width ? 1 : x < 0 ? -1 : 0;
+            const vertical = y > height ? 1 : y < 0 ? -1 : 0;
+
+            let innerHorizontal: OutOfBoundsRegionAxis = horizontal * 2;
+            let innerVertical: OutOfBoundsRegionAxis = vertical * 2;
+            if (horizontal === 0)
+                innerHorizontal = col === -1 ? OutOfBoundsRegionAxis.EndPadding : OutOfBoundsRegionAxis.Center;
+            if (vertical === 0)
+                innerVertical = row === undefined ? OutOfBoundsRegionAxis.EndPadding : OutOfBoundsRegionAxis.Center;
+
+            let isEdge = false;
+            if (col === -1 && row === -1) {
+                const b = getBoundsForItem(canvas, mappedColumns.length - 1, -1);
+                assert(b !== undefined);
+                isEdge = posX < b.x + b.width + edgeDetectionBuffer;
             }
 
-            // -1 === off right edge
-            const col = getColumnIndexForX(x, effectiveCols, translateX);
+            // This is used to ensure that clicking on the scrollbar doesn't unset the selection.
+            // Unfortunately this doesn't work for overlay scrollbars because they are just a broken interaction
+            // by design.
+            const isMaybeScrollbar =
+                (x > width && x < width + getScrollBarWidth()) || (y > height && y < height + getScrollBarWidth());
 
-            // -1: header or above
-            // undefined: offbottom
-            const row = getRowIndexForY(
-                y,
-                height,
-                enableGroups,
-                headerHeight,
-                groupHeaderHeight,
-                rows,
-                rowHeight,
-                cellYOffset,
-                translateY,
-                freezeTrailingRows
-            );
+            result = {
+                kind: outOfBoundsKind,
+                location: [col !== -1 ? col : x < 0 ? 0 : mappedColumns.length - 1, row ?? rows - 1],
+                region: [innerHorizontal, innerVertical],
+                shiftKey,
+                ctrlKey,
+                metaKey,
+                isEdge,
+                isTouch,
+                button,
+                buttons,
+                scrollEdge,
+                isMaybeScrollbar,
+            };
+        } else if (row <= -1) {
+            let bounds = getBoundsForItem(canvas, col, row);
+            assert(bounds !== undefined);
+            let isEdge = bounds !== undefined && bounds.x + bounds.width - posX <= edgeDetectionBuffer;
 
-            const shiftKey = ev?.shiftKey === true;
-            const ctrlKey = ev?.ctrlKey === true;
-            const metaKey = ev?.metaKey === true;
-            const isTouch = (ev !== undefined && !(ev instanceof MouseEvent)) || (ev as any)?.pointerType === "touch";
-
-            const scrollEdge: GridMouseEventArgs["scrollEdge"] = [
-                x < 0 ? -1 : width < x ? 1 : 0,
-                y < totalHeaderHeight ? -1 : height < y ? 1 : 0,
-            ];
-
-            let result: GridMouseEventArgs;
-            if (col === -1 || y < 0 || x < 0 || row === undefined || x > width || y > height) {
-                const horizontal = x > width ? 1 : x < 0 ? -1 : 0;
-                const vertical = y > height ? 1 : y < 0 ? -1 : 0;
-
-                let innerHorizontal: OutOfBoundsRegionAxis = horizontal * 2;
-                let innerVertical: OutOfBoundsRegionAxis = vertical * 2;
-                if (horizontal === 0)
-                    innerHorizontal = col === -1 ? OutOfBoundsRegionAxis.EndPadding : OutOfBoundsRegionAxis.Center;
-                if (vertical === 0)
-                    innerVertical = row === undefined ? OutOfBoundsRegionAxis.EndPadding : OutOfBoundsRegionAxis.Center;
-
-                let isEdge = false;
-                if (col === -1 && row === -1) {
-                    const b = getBoundsForItem(canvas, mappedColumns.length - 1, -1);
-                    assert(b !== undefined);
-                    isEdge = posX < b.x + b.width + edgeDetectionBuffer;
-                }
-
-                // This is used to ensure that clicking on the scrollbar doesn't unset the selection.
-                // Unfortunately this doesn't work for overlay scrollbars because they are just a broken interaction
-                // by design.
-                const isMaybeScrollbar =
-                    (x > width && x < width + getScrollBarWidth()) || (y > height && y < height + getScrollBarWidth());
-
+            const previousCol = col - 1;
+            if (posX - bounds.x <= edgeDetectionBuffer && previousCol >= 0) {
+                isEdge = true;
+                bounds = getBoundsForItem(canvas, previousCol, row);
+                assert(bounds !== undefined);
                 result = {
-                    kind: outOfBoundsKind,
-                    location: [col !== -1 ? col : x < 0 ? 0 : mappedColumns.length - 1, row ?? rows - 1],
-                    region: [innerHorizontal, innerVertical],
+                    kind: enableGroups && row === -2 ? groupHeaderKind : headerKind,
+                    location: [previousCol, row] as any,
+                    bounds: bounds,
+                    group: mappedColumns[previousCol].group ?? "",
+                    isEdge,
                     shiftKey,
                     ctrlKey,
                     metaKey,
-                    isEdge,
                     isTouch,
+                    localEventX: posX - bounds.x,
+                    localEventY: posY - bounds.y,
                     button,
                     buttons,
                     scrollEdge,
-                    isMaybeScrollbar,
                 };
-            } else if (row <= -1) {
-                let bounds = getBoundsForItem(canvas, col, row);
-                assert(bounds !== undefined);
-                let isEdge = bounds !== undefined && bounds.x + bounds.width - posX <= edgeDetectionBuffer;
-
-                const previousCol = col - 1;
-                if (posX - bounds.x <= edgeDetectionBuffer && previousCol >= 0) {
-                    isEdge = true;
-                    bounds = getBoundsForItem(canvas, previousCol, row);
-                    assert(bounds !== undefined);
-                    result = {
-                        kind: enableGroups && row === -2 ? groupHeaderKind : headerKind,
-                        location: [previousCol, row] as any,
-                        bounds: bounds,
-                        group: mappedColumns[previousCol].group ?? "",
-                        isEdge,
-                        shiftKey,
-                        ctrlKey,
-                        metaKey,
-                        isTouch,
-                        localEventX: posX - bounds.x,
-                        localEventY: posY - bounds.y,
-                        button,
-                        buttons,
-                        scrollEdge,
-                    };
-                } else {
-                    result = {
-                        kind: enableGroups && row === -2 ? groupHeaderKind : headerKind,
-                        group: mappedColumns[col].group ?? "",
-                        location: [col, row] as any,
-                        bounds: bounds,
-                        isEdge,
-                        shiftKey,
-                        ctrlKey,
-                        metaKey,
-                        isTouch,
-                        localEventX: posX - bounds.x,
-                        localEventY: posY - bounds.y,
-                        button,
-                        buttons,
-                        scrollEdge,
-                    };
-                }
             } else {
-                const bounds = getBoundsForItem(canvas, col, row);
-                assert(bounds !== undefined);
-                const isEdge = bounds !== undefined && bounds.x + bounds.width - posX < edgeDetectionBuffer;
-
-                let isFillHandle = false;
-                const drawFill = fillHandle !== false && fillHandle !== undefined;
-                if (drawFill && selection.current !== undefined) {
-                    const fill =
-                        typeof fillHandle === "object"
-                            ? { ...DEFAULT_FILL_HANDLE, ...fillHandle }
-                            : DEFAULT_FILL_HANDLE;
-
-                    const fillHandleClickSize = fill.size;
-                    const half = fillHandleClickSize / 2;
-
-                    const fillHandleLocation = rectBottomRight(selection.current.range);
-                    const fillBounds = getBoundsForItem(canvas, fillHandleLocation[0], fillHandleLocation[1]);
-
-                    if (fillBounds !== undefined) {
-                        // Handle center sits exactly on the bottom-right corner of the cell.
-                        // Offset by half pixel to align with grid lines.
-                        const centerX = fillBounds.x + fillBounds.width + fill.offsetX - half + 0.5;
-                        const centerY = fillBounds.y + fillBounds.height + fill.offsetY - half + 0.5;
-
-                        // Check if posX and posY are within fillHandleClickSize from handleLogicalCenter
-                        isFillHandle =
-                            Math.abs(centerX - posX) < fillHandleClickSize &&
-                            Math.abs(centerY - posY) < fillHandleClickSize;
-                    }
-                }
-
                 result = {
-                    kind: "cell",
-                    location: [col, row],
+                    kind: enableGroups && row === -2 ? groupHeaderKind : headerKind,
+                    group: mappedColumns[col].group ?? "",
+                    location: [col, row] as any,
                     bounds: bounds,
                     isEdge,
                     shiftKey,
                     ctrlKey,
-                    isFillHandle,
                     metaKey,
                     isTouch,
                     localEventX: posX - bounds.x,
@@ -690,28 +840,55 @@ const DataGrid: React.ForwardRefRenderFunction<DataGridRef, DataGridProps> = (p,
                     scrollEdge,
                 };
             }
-            return result;
-        },
-        [
-            width,
-            mappedColumns,
-            cellXOffset,
-            translateX,
-            height,
-            enableGroups,
-            headerHeight,
-            groupHeaderHeight,
-            rows,
-            rowHeight,
-            cellYOffset,
-            translateY,
-            freezeTrailingRows,
-            getBoundsForItem,
-            fillHandle,
-            selection,
-            totalHeaderHeight,
-        ]
-    );
+        } else {
+            const bounds = getBoundsForItem(canvas, col, row);
+            assert(bounds !== undefined);
+            const isEdge = bounds !== undefined && bounds.x + bounds.width - posX < edgeDetectionBuffer;
+
+            let isFillHandle = false;
+            const drawFill = fillHandle !== false && fillHandle !== undefined;
+            if (drawFill && selection.current !== undefined) {
+                const fill =
+                    typeof fillHandle === "object" ? { ...DEFAULT_FILL_HANDLE, ...fillHandle } : DEFAULT_FILL_HANDLE;
+
+                const fillHandleClickSize = fill.size;
+                const half = fillHandleClickSize / 2;
+
+                const fillHandleLocation = rectBottomRight(selection.current.range);
+                const fillBounds = getBoundsForItem(canvas, fillHandleLocation[0], fillHandleLocation[1]);
+
+                if (fillBounds !== undefined) {
+                    // Handle center sits exactly on the bottom-right corner of the cell.
+                    // Offset by half pixel to align with grid lines.
+                    const centerX = fillBounds.x + fillBounds.width + fill.offsetX - half + 0.5;
+                    const centerY = fillBounds.y + fillBounds.height + fill.offsetY - half + 0.5;
+
+                    // Check if posX and posY are within fillHandleClickSize from handleLogicalCenter
+                    isFillHandle =
+                        Math.abs(centerX - posX) < fillHandleClickSize &&
+                        Math.abs(centerY - posY) < fillHandleClickSize;
+                }
+            }
+
+            result = {
+                kind: "cell",
+                location: [col, row],
+                bounds: bounds,
+                isEdge,
+                shiftKey,
+                ctrlKey,
+                isFillHandle,
+                metaKey,
+                isTouch,
+                localEventX: posX - bounds.x,
+                localEventY: posY - bounds.y,
+                button,
+                buttons,
+                scrollEdge,
+            };
+        }
+        return result;
+    };
 
     const [hoveredItem] = hoveredItemInfo ?? [];
 
@@ -733,64 +910,78 @@ const DataGrid: React.ForwardRefRenderFunction<DataGridRef, DataGridProps> = (p,
         return [a.getContext("2d", { alpha: false }), b.getContext("2d", { alpha: false })];
     }, []);
 
-    React.useLayoutEffect(() => {
-        if (bufferACtx === null || bufferBCtx === null) return;
-        document.documentElement.append(bufferACtx.canvas);
-        document.documentElement.append(bufferBCtx.canvas);
-        return () => {
-            bufferACtx.canvas.remove();
-            bufferBCtx.canvas.remove();
-        };
-    }, [bufferACtx, bufferBCtx]);
+    React.useLayoutEffect(() => attachBuffers(bufferACtx, bufferBCtx), [bufferACtx, bufferBCtx]);
 
     const renderStateProvider = React.useMemo(() => new RenderStateProvider(), []);
 
     const maxDPR = enableFirefoxRescaling && scrolling ? 1 : enableSafariRescaling && scrolling ? 2 : 5;
     const minimumCellWidth = experimental?.disableMinimumCellWidth === true ? 1 : 10;
-    const lastArgsRef = React.useRef<DrawGridArg>();
-
     const canvasCtx = React.useRef<CanvasRenderingContext2D | null>(null);
     const overlayCtx = React.useRef<CanvasRenderingContext2D | null>(null);
 
-    const draw = React.useCallback(() => {
-        const canvas = ref.current;
-        const overlay = overlayRef.current;
-        if (canvas === null || overlay === null) return;
-
-        if (canvasCtx.current === null) {
-            canvasCtx.current = canvas.getContext("2d", { alpha: false });
-            canvas.width = 0;
-            canvas.height = 0;
-        }
-
-        if (overlayCtx.current === null) {
-            overlayCtx.current = overlay.getContext("2d", { alpha: false });
-            overlay.width = 0;
-            overlay.height = 0;
-        }
-
-        if (canvasCtx.current === null || overlayCtx.current === null || bufferACtx === null || bufferBCtx === null) {
-            return;
-        }
-
-        let didOverride = false;
-        const overrideCursor = (cursor: React.CSSProperties["cursor"]) => {
-            didOverride = true;
-            setDrawCursorOverride(cursor);
-        };
-
-        const last = lastArgsRef.current;
-        const current = {
-            headerCanvasCtx: overlayCtx.current,
-            canvasCtx: canvasCtx.current,
+    // Everything a draw reads that comes from props or state. A new object means the canvas must be redrawn.
+    const drawInputs = React.useMemo(
+        () =>
+            bufferACtx === null || bufferBCtx === null
+                ? undefined
+                : {
+                      bufferACtx,
+                      bufferBCtx,
+                      width,
+                      height,
+                      cellXOffset,
+                      cellYOffset,
+                      translateX: Math.round(translateX),
+                      translateY: Math.round(translateY),
+                      mappedColumns,
+                      enableGroups,
+                      freezeColumns,
+                      dragAndDropState,
+                      theme,
+                      headerHeight,
+                      groupHeaderHeight,
+                      disabledRows: disabledRows ?? CompactSelection.empty(),
+                      rowHeight,
+                      verticalBorder,
+                      isResizing,
+                      resizeCol,
+                      isFocused,
+                      selection,
+                      fillHandle,
+                      drawCellCallback,
+                      hasAppendRow,
+                      maxScaleFactor: maxDPR,
+                      freezeTrailingRows,
+                      rows,
+                      drawFocus: drawFocusRing,
+                      getCellContent,
+                      getGroupDetails: getGroupDetails ?? defaultGetGroupDetails,
+                      getRowThemeOverride,
+                      drawHeaderCallback,
+                      prelightCells,
+                      highlightRegions,
+                      imageLoader,
+                      lastBlitData,
+                      spriteManager,
+                      scrolling,
+                      hyperWrapping: experimental?.hyperWrapping ?? false,
+                      touchMode: lastWasTouch,
+                      renderStateProvider,
+                      renderStrategy:
+                          experimental?.renderStrategy ?? (browserIsSafari.value ? "double-buffer" : "single-buffer"),
+                      getCellRenderer,
+                      minimumCellWidth,
+                      resizeIndicator,
+                  },
+        [
             bufferACtx,
             bufferBCtx,
             width,
             height,
             cellXOffset,
             cellYOffset,
-            translateX: Math.round(translateX),
-            translateY: Math.round(translateY),
+            translateX,
+            translateY,
             mappedColumns,
             enableGroups,
             freezeColumns,
@@ -798,111 +989,56 @@ const DataGrid: React.ForwardRefRenderFunction<DataGridRef, DataGridProps> = (p,
             theme,
             headerHeight,
             groupHeaderHeight,
-            disabledRows: disabledRows ?? CompactSelection.empty(),
+            disabledRows,
             rowHeight,
             verticalBorder,
             isResizing,
+            hasAppendRow,
             resizeCol,
             isFocused,
             selection,
             fillHandle,
-            drawCellCallback,
-            hasAppendRow,
-            overrideCursor,
-            maxScaleFactor: maxDPR,
             freezeTrailingRows,
             rows,
-            drawFocus: drawFocusRing,
+            drawFocusRing,
+            maxDPR,
             getCellContent,
-            getGroupDetails: getGroupDetails ?? (name => ({ name })),
+            getGroupDetails,
             getRowThemeOverride,
+            drawCellCallback,
             drawHeaderCallback,
             prelightCells,
             highlightRegions,
             imageLoader,
-            lastBlitData,
-            damage: damageRegion.current,
-            hoverValues: hoverValues.current,
-            hoverInfo: hoverInfoRef.current,
             spriteManager,
             scrolling,
-            hyperWrapping: experimental?.hyperWrapping ?? false,
-            touchMode: lastWasTouch,
-            enqueue: enqueueRef.current,
+            experimental?.hyperWrapping,
+            experimental?.renderStrategy,
+            lastWasTouch,
             renderStateProvider,
-            renderStrategy: experimental?.renderStrategy ?? (browserIsSafari.value ? "double-buffer" : "single-buffer"),
             getCellRenderer,
             minimumCellWidth,
             resizeIndicator,
-        };
+        ]
+    );
 
-        // This confusing bit of code due to some poor design. Long story short, the damage property is only used
-        // with what is effectively the "last args" for the last normal draw anyway. We don't want the drawing code
-        // to look at this and go "shit dawg, nothing changed" so we force it to draw frash, but the damage restricts
-        // the draw anyway.
-        //
-        // Dear future Jason, I'm sorry. It was expedient, it worked, and had almost zero perf overhead. THe universe
-        // basically made me do it. What choice did I have?
-        if (current.damage === undefined) {
-            lastArgsRef.current = current;
-            drawGrid(current, last);
-        } else {
-            drawGrid(current, undefined);
-        }
+    const draw = React.useMemo(
+        () =>
+            makeDraw(drawInputs, {
+                canvasRef: ref,
+                overlayRef,
+                canvasCtx,
+                overlayCtx,
+                lastArgsRef,
+                damageRegion,
+                hoverValues,
+                hoverInfoRef,
+                enqueueRef,
+                setDrawCursorOverride,
+            }),
+        [drawInputs]
+    );
 
-        // don't reset on damage events
-        if (!didOverride && (current.damage === undefined || current.damage.has(hoverInfoRef?.current?.[0]))) {
-            setDrawCursorOverride(undefined);
-        }
-    }, [
-        bufferACtx,
-        bufferBCtx,
-        width,
-        height,
-        cellXOffset,
-        cellYOffset,
-        translateX,
-        translateY,
-        mappedColumns,
-        enableGroups,
-        freezeColumns,
-        dragAndDropState,
-        theme,
-        headerHeight,
-        groupHeaderHeight,
-        disabledRows,
-        rowHeight,
-        verticalBorder,
-        isResizing,
-        hasAppendRow,
-        resizeCol,
-        isFocused,
-        selection,
-        fillHandle,
-        freezeTrailingRows,
-        rows,
-        drawFocusRing,
-        maxDPR,
-        getCellContent,
-        getGroupDetails,
-        getRowThemeOverride,
-        drawCellCallback,
-        drawHeaderCallback,
-        prelightCells,
-        highlightRegions,
-        imageLoader,
-        spriteManager,
-        scrolling,
-        experimental?.hyperWrapping,
-        experimental?.renderStrategy,
-        lastWasTouch,
-        renderStateProvider,
-        getCellRenderer,
-        minimumCellWidth,
-        resizeIndicator,
-    ]);
-
-    const lastDrawRef = React.useRef(draw);
     React.useLayoutEffect(() => {
         draw();
         lastDrawRef.current = draw;
@@ -918,21 +1054,14 @@ const DataGrid: React.ForwardRefRenderFunction<DataGridRef, DataGridProps> = (p,
         void fn();
     }, []);
 
-    const damageInternal = React.useCallback((locations: CellSet) => {
-        damageRegion.current = locations;
-        lastDrawRef.current();
-        damageRegion.current = undefined;
-    }, []);
+    const [damageInternal] = React.useState(() => makeDamageInternal(damageRegion, lastDrawRef));
 
     const enqueue = useAnimationQueue(damageInternal);
     enqueueRef.current = enqueue;
 
-    const damage = React.useCallback(
-        (cells: DamageUpdateList) => {
-            damageInternal(new CellSet(cells.map(x => x.cell)));
-        },
-        [damageInternal]
-    );
+    const damage = (cells: DamageUpdateList) => {
+        damageInternal(new CellSet(cells.map(x => x.cell)));
+    };
 
     imageLoader.setCallback(damageInternal);
 
@@ -988,296 +1117,264 @@ const DataGrid: React.ForwardRefRenderFunction<DataGridRef, DataGridProps> = (p,
         target.style.cursor = lastSetCursor.current = style.cursor;
     }
 
-    const groupHeaderActionForEvent = React.useCallback(
-        (group: string, bounds: Rectangle, localEventX: number, localEventY: number) => {
-            if (getGroupDetails === undefined) return undefined;
-            const groupDesc = getGroupDetails(group);
-            if (groupDesc.actions !== undefined) {
-                const boxes = getActionBoundsForGroup(bounds, groupDesc.actions);
-                for (const [i, box] of boxes.entries()) {
-                    if (pointInRect(box, localEventX + bounds.x, localEventY + box.y)) {
-                        return groupDesc.actions[i];
-                    }
+    const groupHeaderActionForEvent = (group: string, bounds: Rectangle, localEventX: number, localEventY: number) => {
+        if (getGroupDetails === undefined) return undefined;
+        const groupDesc = getGroupDetails(group);
+        if (groupDesc.actions !== undefined) {
+            const boxes = getActionBoundsForGroup(bounds, groupDesc.actions);
+            for (const [i, box] of boxes.entries()) {
+                if (pointInRect(box, localEventX + bounds.x, localEventY + box.y)) {
+                    return groupDesc.actions[i];
                 }
             }
-            return undefined;
-        },
-        [getGroupDetails]
-    );
+        }
+        return undefined;
+    };
 
-    const isOverHeaderElement = React.useCallback(
-        (
-            canvas: HTMLCanvasElement,
-            col: number,
-            clientX: number,
-            clientY: number
-        ):
-            | {
-                  area: "menu" | "indicator";
-                  bounds: Rectangle;
-              }
-            | undefined => {
-            const header = mappedColumns[col];
+    const isOverHeaderElement = (
+        canvas: HTMLCanvasElement,
+        col: number,
+        clientX: number,
+        clientY: number
+    ):
+        | {
+              area: "menu" | "indicator";
+              bounds: Rectangle;
+          }
+        | undefined => {
+        const header = mappedColumns[col];
 
-            if (!isDragging && !isResizing && !(hoveredOnEdge ?? false)) {
-                const headerBounds = getBoundsForItem(canvas, col, -1);
-                assert(headerBounds !== undefined);
-                const headerLayout = computeHeaderLayout(
-                    undefined,
-                    header,
-                    headerBounds.x,
-                    headerBounds.y,
-                    headerBounds.width,
-                    headerBounds.height,
-                    theme,
-                    direction(header.title) === "rtl"
-                );
-                if (
-                    header.hasMenu === true &&
-                    headerLayout.menuBounds !== undefined &&
-                    pointInRect(headerLayout.menuBounds, clientX, clientY)
-                ) {
-                    return {
-                        area: "menu",
-                        bounds: headerLayout.menuBounds,
-                    };
-                } else if (
-                    header.indicatorIcon !== undefined &&
-                    headerLayout.indicatorIconBounds !== undefined &&
-                    pointInRect(headerLayout.indicatorIconBounds, clientX, clientY)
-                ) {
-                    return {
-                        area: "indicator",
-                        bounds: headerLayout.indicatorIconBounds,
-                    };
-                }
+        if (!isDragging && !isResizing && !(hoveredOnEdge ?? false)) {
+            const headerBounds = getBoundsForItem(canvas, col, -1);
+            assert(headerBounds !== undefined);
+            const headerLayout = computeHeaderLayout(
+                undefined,
+                header,
+                headerBounds.x,
+                headerBounds.y,
+                headerBounds.width,
+                headerBounds.height,
+                theme,
+                direction(header.title) === "rtl"
+            );
+            if (
+                header.hasMenu === true &&
+                headerLayout.menuBounds !== undefined &&
+                pointInRect(headerLayout.menuBounds, clientX, clientY)
+            ) {
+                return {
+                    area: "menu",
+                    bounds: headerLayout.menuBounds,
+                };
+            } else if (
+                header.indicatorIcon !== undefined &&
+                headerLayout.indicatorIconBounds !== undefined &&
+                pointInRect(headerLayout.indicatorIconBounds, clientX, clientY)
+            ) {
+                return {
+                    area: "indicator",
+                    bounds: headerLayout.indicatorIconBounds,
+                };
             }
-            return undefined;
-        },
-        [mappedColumns, getBoundsForItem, hoveredOnEdge, isDragging, isResizing, theme]
-    );
+        }
+        return undefined;
+    };
 
     const downTime = React.useRef(0);
     const downPosition = React.useRef<Item>();
     const mouseDown = React.useRef(false);
-    const onMouseDownImpl = React.useCallback(
-        (ev: MouseEvent | TouchEvent) => {
-            const canvas = ref.current;
-            const eventTarget = eventTargetRef?.current;
-            if (canvas === null || (ev.target !== canvas && ev.target !== eventTarget)) return;
-            mouseDown.current = true;
+    const onMouseDownImpl = (ev: MouseEvent | TouchEvent) => {
+        const canvas = ref.current;
+        const eventTarget = eventTargetRef?.current;
+        if (canvas === null || (ev.target !== canvas && ev.target !== eventTarget)) return;
+        mouseDown.current = true;
 
-            let clientX: number;
-            let clientY: number;
-            if (ev instanceof MouseEvent) {
-                clientX = ev.clientX;
-                clientY = ev.clientY;
-            } else {
-                clientX = ev.touches[0].clientX;
-                clientY = ev.touches[0].clientY;
-            }
-            if (ev.target === eventTarget && eventTarget !== null) {
-                const bounds = eventTarget.getBoundingClientRect();
-                if (clientX > bounds.right || clientY > bounds.bottom) return;
-            }
+        let clientX: number;
+        let clientY: number;
+        if (ev instanceof MouseEvent) {
+            clientX = ev.clientX;
+            clientY = ev.clientY;
+        } else {
+            clientX = ev.touches[0].clientX;
+            clientY = ev.touches[0].clientY;
+        }
+        if (ev.target === eventTarget && eventTarget !== null) {
+            const bounds = eventTarget.getBoundingClientRect();
+            if (clientX > bounds.right || clientY > bounds.bottom) return;
+        }
 
-            const args = getMouseArgsForPosition(canvas, clientX, clientY, ev);
-            downPosition.current = args.location;
+        const args = getMouseArgsForPosition(canvas, clientX, clientY, ev);
+        downPosition.current = args.location;
 
-            if (args.isTouch) {
-                downTime.current = Date.now();
-            }
-            if (lastWasTouchRef.current !== args.isTouch) {
-                setLastWasTouch(args.isTouch);
-            }
+        if (args.isTouch) {
+            downTime.current = Date.now();
+        }
+        if (lastWasTouchRef.current !== args.isTouch) {
+            setLastWasTouch(args.isTouch);
+        }
 
-            if (
-                args.kind === headerKind &&
-                isOverHeaderElement(canvas, args.location[0], clientX, clientY) !== undefined
-            ) {
+        if (args.kind === headerKind && isOverHeaderElement(canvas, args.location[0], clientX, clientY) !== undefined) {
+            return;
+        } else if (args.kind === groupHeaderKind) {
+            const action = groupHeaderActionForEvent(args.group, args.bounds, args.localEventX, args.localEventY);
+            if (action !== undefined) {
                 return;
-            } else if (args.kind === groupHeaderKind) {
-                const action = groupHeaderActionForEvent(args.group, args.bounds, args.localEventX, args.localEventY);
-                if (action !== undefined) {
-                    return;
-                }
             }
+        }
 
-            onMouseDown?.(args);
-            if (
-                !args.isTouch &&
-                isDraggable !== true &&
-                isDraggable !== args.kind &&
-                args.button < 3 &&
-                args.button !== 1
-            ) {
-                // preventing default in touch events stops scroll
-                ev.preventDefault();
-            }
-        },
-        [
-            eventTargetRef,
-            isDraggable,
-            getMouseArgsForPosition,
-            groupHeaderActionForEvent,
-            isOverHeaderElement,
-            onMouseDown,
-        ]
-    );
+        onMouseDown?.(args);
+        if (
+            !args.isTouch &&
+            isDraggable !== true &&
+            isDraggable !== args.kind &&
+            args.button < 3 &&
+            args.button !== 1
+        ) {
+            // preventing default in touch events stops scroll
+            ev.preventDefault();
+        }
+    };
     useEventListener("touchstart", onMouseDownImpl, windowEventTarget, false);
     useEventListener("mousedown", onMouseDownImpl, windowEventTarget, false);
 
     const lastUpTime = React.useRef(0);
 
-    const onMouseUpImpl = React.useCallback(
-        (ev: MouseEvent | TouchEvent) => {
-            const lastUpTimeValue = lastUpTime.current;
-            lastUpTime.current = Date.now();
-            const canvas = ref.current;
-            mouseDown.current = false;
-            if (onMouseUp === undefined || canvas === null) return;
-            const eventTarget = eventTargetRef?.current;
+    const onMouseUpImpl = (ev: MouseEvent | TouchEvent) => {
+        const lastUpTimeValue = lastUpTime.current;
+        lastUpTime.current = Date.now();
+        const canvas = ref.current;
+        mouseDown.current = false;
+        if (onMouseUp === undefined || canvas === null) return;
+        const eventTarget = eventTargetRef?.current;
 
-            const isOutside = ev.target !== canvas && ev.target !== eventTarget;
+        const isOutside = ev.target !== canvas && ev.target !== eventTarget;
 
-            let clientX: number;
-            let clientY: number;
-            let canCancel = true;
-            if (ev instanceof MouseEvent) {
-                clientX = ev.clientX;
-                clientY = ev.clientY;
-                canCancel = ev.button < 3;
-                if ((ev as any).pointerType === "touch") {
-                    return;
-                }
-            } else {
-                clientX = ev.changedTouches[0].clientX;
-                clientY = ev.changedTouches[0].clientY;
+        let clientX: number;
+        let clientY: number;
+        let canCancel = true;
+        if (ev instanceof MouseEvent) {
+            clientX = ev.clientX;
+            clientY = ev.clientY;
+            canCancel = ev.button < 3;
+            if ((ev as any).pointerType === "touch") {
+                return;
             }
+        } else {
+            clientX = ev.changedTouches[0].clientX;
+            clientY = ev.changedTouches[0].clientY;
+        }
 
-            let args = getMouseArgsForPosition(canvas, clientX, clientY, ev);
+        let args = getMouseArgsForPosition(canvas, clientX, clientY, ev);
 
-            if (args.isTouch && downTime.current !== 0 && Date.now() - downTime.current > 500) {
-                args = {
-                    ...args,
-                    isLongTouch: true,
-                };
+        if (args.isTouch && downTime.current !== 0 && Date.now() - downTime.current > 500) {
+            args = {
+                ...args,
+                isLongTouch: true,
+            };
+        }
+
+        if (lastUpTimeValue !== 0 && Date.now() - lastUpTimeValue < (args.isTouch ? 1000 : 500)) {
+            args = {
+                ...args,
+                isDoubleClick: true,
+            };
+        }
+
+        if (lastWasTouchRef.current !== args.isTouch) {
+            setLastWasTouch(args.isTouch);
+        }
+
+        if (!isOutside && ev.cancelable && canCancel) {
+            ev.preventDefault();
+        }
+
+        const [col] = args.location;
+        const headerBounds = isOverHeaderElement(canvas, col, clientX, clientY);
+        if (args.kind === headerKind && headerBounds !== undefined) {
+            if (args.button !== 0 || downPosition.current?.[0] !== col || downPosition.current?.[1] !== -1) {
+                // force outside so that click will not process
+                onMouseUp(args, true);
             }
-
-            if (lastUpTimeValue !== 0 && Date.now() - lastUpTimeValue < (args.isTouch ? 1000 : 500)) {
-                args = {
-                    ...args,
-                    isDoubleClick: true,
-                };
-            }
-
-            if (lastWasTouchRef.current !== args.isTouch) {
-                setLastWasTouch(args.isTouch);
-            }
-
-            if (!isOutside && ev.cancelable && canCancel) {
-                ev.preventDefault();
-            }
-
-            const [col] = args.location;
-            const headerBounds = isOverHeaderElement(canvas, col, clientX, clientY);
-            if (args.kind === headerKind && headerBounds !== undefined) {
-                if (args.button !== 0 || downPosition.current?.[0] !== col || downPosition.current?.[1] !== -1) {
-                    // force outside so that click will not process
-                    onMouseUp(args, true);
+            return;
+        } else if (args.kind === groupHeaderKind) {
+            const action = groupHeaderActionForEvent(args.group, args.bounds, args.localEventX, args.localEventY);
+            if (action !== undefined) {
+                if (args.button === 0) {
+                    action.onClick(args);
                 }
                 return;
-            } else if (args.kind === groupHeaderKind) {
-                const action = groupHeaderActionForEvent(args.group, args.bounds, args.localEventX, args.localEventY);
-                if (action !== undefined) {
-                    if (args.button === 0) {
-                        action.onClick(args);
-                    }
-                    return;
-                }
             }
+        }
 
-            onMouseUp(args, isOutside);
-        },
-        [onMouseUp, eventTargetRef, getMouseArgsForPosition, isOverHeaderElement, groupHeaderActionForEvent]
-    );
+        onMouseUp(args, isOutside);
+    };
     useEventListener("mouseup", onMouseUpImpl, windowEventTarget, false);
     useEventListener("touchend", onMouseUpImpl, windowEventTarget, false);
 
-    const onClickImpl = React.useCallback(
-        (ev: MouseEvent | TouchEvent) => {
-            const canvas = ref.current;
-            if (canvas === null) return;
-            const eventTarget = eventTargetRef?.current;
+    const onClickImpl = (ev: MouseEvent | TouchEvent) => {
+        const canvas = ref.current;
+        if (canvas === null) return;
+        const eventTarget = eventTargetRef?.current;
 
-            const isOutside = ev.target !== canvas && ev.target !== eventTarget;
+        const isOutside = ev.target !== canvas && ev.target !== eventTarget;
 
-            let clientX: number;
-            let clientY: number;
-            let canCancel = true;
-            if (ev instanceof MouseEvent) {
-                clientX = ev.clientX;
-                clientY = ev.clientY;
-                canCancel = ev.button < 3;
-            } else {
-                clientX = ev.changedTouches[0].clientX;
-                clientY = ev.changedTouches[0].clientY;
-            }
+        let clientX: number;
+        let clientY: number;
+        let canCancel = true;
+        if (ev instanceof MouseEvent) {
+            clientX = ev.clientX;
+            clientY = ev.clientY;
+            canCancel = ev.button < 3;
+        } else {
+            clientX = ev.changedTouches[0].clientX;
+            clientY = ev.changedTouches[0].clientY;
+        }
 
-            const args = getMouseArgsForPosition(canvas, clientX, clientY, ev);
+        const args = getMouseArgsForPosition(canvas, clientX, clientY, ev);
 
-            if (lastWasTouchRef.current !== args.isTouch) {
-                setLastWasTouch(args.isTouch);
-            }
+        if (lastWasTouchRef.current !== args.isTouch) {
+            setLastWasTouch(args.isTouch);
+        }
 
-            if (!isOutside && ev.cancelable && canCancel) {
-                ev.preventDefault();
-            }
+        if (!isOutside && ev.cancelable && canCancel) {
+            ev.preventDefault();
+        }
 
-            const [col] = args.location;
-            if (args.kind === headerKind) {
-                const headerBounds = isOverHeaderElement(canvas, col, clientX, clientY);
-                if (
-                    headerBounds !== undefined &&
-                    args.button === 0 &&
-                    downPosition.current?.[0] === col &&
-                    downPosition.current?.[1] === -1
-                ) {
-                    if (headerBounds.area === "menu") {
-                        onHeaderMenuClick?.(col, headerBounds.bounds);
-                    } else if (headerBounds.area === "indicator") {
-                        onHeaderIndicatorClick?.(col, headerBounds.bounds);
-                    }
+        const [col] = args.location;
+        if (args.kind === headerKind) {
+            const headerBounds = isOverHeaderElement(canvas, col, clientX, clientY);
+            if (
+                headerBounds !== undefined &&
+                args.button === 0 &&
+                downPosition.current?.[0] === col &&
+                downPosition.current?.[1] === -1
+            ) {
+                if (headerBounds.area === "menu") {
+                    onHeaderMenuClick?.(col, headerBounds.bounds);
+                } else if (headerBounds.area === "indicator") {
+                    onHeaderIndicatorClick?.(col, headerBounds.bounds);
                 }
             }
-        },
-        [eventTargetRef, getMouseArgsForPosition, isOverHeaderElement, onHeaderMenuClick, onHeaderIndicatorClick]
-    );
+        }
+    };
     useEventListener("click", onClickImpl, windowEventTarget, false);
 
-    const onContextMenuImpl = React.useCallback(
-        (ev: MouseEvent) => {
-            const canvas = ref.current;
-            const eventTarget = eventTargetRef?.current;
-            if (canvas === null || (ev.target !== canvas && ev.target !== eventTarget) || onContextMenu === undefined)
-                return;
-            const args = getMouseArgsForPosition(canvas, ev.clientX, ev.clientY, ev);
-            onContextMenu(args, () => {
-                if (ev.cancelable) ev.preventDefault();
-            });
-        },
-        [eventTargetRef, getMouseArgsForPosition, onContextMenu]
-    );
+    const onContextMenuImpl = (ev: MouseEvent) => {
+        const canvas = ref.current;
+        const eventTarget = eventTargetRef?.current;
+        if (canvas === null || (ev.target !== canvas && ev.target !== eventTarget) || onContextMenu === undefined)
+            return;
+        const args = getMouseArgsForPosition(canvas, ev.clientX, ev.clientY, ev);
+        onContextMenu(args, () => {
+            if (ev.cancelable) ev.preventDefault();
+        });
+    };
     useEventListener("contextmenu", onContextMenuImpl, eventTargetRef?.current ?? null, false);
 
-    const onAnimationFrame = React.useCallback<StepCallback>(values => {
-        damageRegion.current = new CellSet(values.map(x => x.item));
-        hoverValues.current = values;
-        lastDrawRef.current();
-        damageRegion.current = undefined;
-    }, []);
-
-    const animManagerValue = React.useMemo(() => new AnimationManager(onAnimationFrame), [onAnimationFrame]);
+    const animManagerValue = React.useMemo(
+        () => new AnimationManager(makeOnAnimationFrame(damageRegion, hoverValues, lastDrawRef)),
+        []
+    );
     const animationManager = React.useRef(animManagerValue);
     animationManager.current = animManagerValue;
     React.useLayoutEffect(() => {
@@ -1295,451 +1392,410 @@ const DataGrid: React.ForwardRefRenderFunction<DataGridRef, DataGridProps> = (p,
     }, [getCellContent, getCellRenderer, hoveredItem]);
 
     const hoveredRef = React.useRef<GridMouseEventArgs>();
-    const onMouseMoveImpl = React.useCallback(
-        (ev: MouseEvent) => {
-            const canvas = ref.current;
-            if (canvas === null) return;
+    const onMouseMoveImpl = (ev: MouseEvent) => {
+        const canvas = ref.current;
+        if (canvas === null) return;
 
-            const eventTarget = eventTargetRef?.current;
-            const isIndirect = ev.target !== canvas && ev.target !== eventTarget;
+        const eventTarget = eventTargetRef?.current;
+        const isIndirect = ev.target !== canvas && ev.target !== eventTarget;
 
-            const args = getMouseArgsForPosition(canvas, ev.clientX, ev.clientY, ev);
-            if (args.kind !== "out-of-bounds" && isIndirect && !mouseDown.current && !args.isTouch) {
-                // we are obscured by something else, so we want to not register events if we are not doing anything
-                // important already
-                return;
+        const args = getMouseArgsForPosition(canvas, ev.clientX, ev.clientY, ev);
+        if (args.kind !== "out-of-bounds" && isIndirect && !mouseDown.current && !args.isTouch) {
+            // we are obscured by something else, so we want to not register events if we are not doing anything
+            // important already
+            return;
+        }
+
+        // the point here is not to trigger re-renders every time the mouse moves over a cell
+        // that doesn't care about the mouse positon.
+        // eslint-disable-next-line unicorn/consistent-function-scoping
+        const maybeSetHoveredInfo = (newVal: typeof hoveredItemInfo, needPosition: boolean) => {
+            setHoveredItemInfo(cv => {
+                if (cv === newVal) return cv;
+                if (
+                    cv?.[0][0] === newVal?.[0][0] &&
+                    cv?.[0][1] === newVal?.[0][1] &&
+                    ((cv?.[1][0] === newVal?.[1][0] && cv?.[1][1] === newVal?.[1][1]) || !needPosition)
+                ) {
+                    return cv;
+                }
+                return newVal;
+            });
+        };
+
+        if (!mouseEventArgsAreEqual(args, hoveredRef.current)) {
+            setDrawCursorOverride(undefined);
+            onItemHovered?.(args);
+            maybeSetHoveredInfo(
+                args.kind === outOfBoundsKind ? undefined : [args.location, [args.localEventX, args.localEventY]],
+                true
+            );
+            hoveredRef.current = args;
+        } else if (args.kind === "cell" || args.kind === headerKind || args.kind === groupHeaderKind) {
+            let needsDamageCell = false;
+            let needsHoverPosition = true;
+
+            if (args.kind === "cell") {
+                const toCheck = getCellContent(args.location);
+                const rendererNeeds = getCellRenderer(toCheck)?.needsHoverPosition;
+                // custom cells we will assume need the position if they don't explicitly say they don't, everything
+                // else we will assume doesn't need it.
+                needsHoverPosition = rendererNeeds ?? toCheck.kind === GridCellKind.Custom;
+                needsDamageCell = needsHoverPosition;
+            } else {
+                needsDamageCell = true;
             }
 
-            // the point here is not to trigger re-renders every time the mouse moves over a cell
-            // that doesn't care about the mouse positon.
-            const maybeSetHoveredInfo = (newVal: typeof hoveredItemInfo, needPosition: boolean) => {
-                setHoveredItemInfo(cv => {
-                    if (cv === newVal) return cv;
-                    if (
-                        cv?.[0][0] === newVal?.[0][0] &&
-                        cv?.[0][1] === newVal?.[0][1] &&
-                        ((cv?.[1][0] === newVal?.[1][0] && cv?.[1][1] === newVal?.[1][1]) || !needPosition)
-                    ) {
-                        return cv;
-                    }
-                    return newVal;
-                });
-            };
-
-            if (!mouseEventArgsAreEqual(args, hoveredRef.current)) {
-                setDrawCursorOverride(undefined);
-                onItemHovered?.(args);
-                maybeSetHoveredInfo(
-                    args.kind === outOfBoundsKind ? undefined : [args.location, [args.localEventX, args.localEventY]],
-                    true
-                );
-                hoveredRef.current = args;
-            } else if (args.kind === "cell" || args.kind === headerKind || args.kind === groupHeaderKind) {
-                let needsDamageCell = false;
-                let needsHoverPosition = true;
-
-                if (args.kind === "cell") {
-                    const toCheck = getCellContent(args.location);
-                    const rendererNeeds = getCellRenderer(toCheck)?.needsHoverPosition;
-                    // custom cells we will assume need the position if they don't explicitly say they don't, everything
-                    // else we will assume doesn't need it.
-                    needsHoverPosition = rendererNeeds ?? toCheck.kind === GridCellKind.Custom;
-                    needsDamageCell = needsHoverPosition;
-                } else {
-                    needsDamageCell = true;
-                }
-
-                const newInfo: typeof hoverInfoRef.current = [args.location, [args.localEventX, args.localEventY]];
-                maybeSetHoveredInfo(newInfo, needsHoverPosition);
-                hoverInfoRef.current = newInfo;
-                if (needsDamageCell) {
-                    damageInternal(new CellSet([args.location]));
-                }
+            const newInfo: typeof hoverInfoRef.current = [args.location, [args.localEventX, args.localEventY]];
+            maybeSetHoveredInfo(newInfo, needsHoverPosition);
+            hoverInfoRef.current = newInfo;
+            if (needsDamageCell) {
+                damageInternal(new CellSet([args.location]));
             }
+        }
 
-            const notRowMarkerCol = args.location[0] >= (firstColAccessible ? 0 : 1);
-            setHoveredOnEdge(args.kind === headerKind && args.isEdge && notRowMarkerCol && allowResize === true);
+        const notRowMarkerCol = args.location[0] >= (firstColAccessible ? 0 : 1);
+        setHoveredOnEdge(args.kind === headerKind && args.isEdge && notRowMarkerCol && allowResize === true);
 
-            setOverFill(args.kind === "cell" && args.isFillHandle);
+        setOverFill(args.kind === "cell" && args.isFillHandle);
 
-            onMouseMoveRaw?.(ev);
-            onMouseMove(args);
-        },
-        [
-            eventTargetRef,
-            getMouseArgsForPosition,
-            firstColAccessible,
-            allowResize,
-            onMouseMoveRaw,
-            onMouseMove,
-            onItemHovered,
-            getCellContent,
-            getCellRenderer,
-            damageInternal,
-        ]
-    );
+        onMouseMoveRaw?.(ev);
+        onMouseMove(args);
+    };
     useEventListener("mousemove", onMouseMoveImpl, windowEventTarget, true);
 
-    const onKeyDownImpl = React.useCallback(
-        (event: React.KeyboardEvent<HTMLCanvasElement>) => {
-            const canvas = ref.current;
-            if (canvas === null) return;
+    const onKeyDownImpl = useStableCallback((event: React.KeyboardEvent<HTMLCanvasElement>) => {
+        const canvas = ref.current;
+        if (canvas === null) return;
 
-            let bounds: Rectangle | undefined;
-            let location: Item | undefined = undefined;
-            if (selection.current !== undefined) {
-                bounds = getBoundsForItem(canvas, selection.current.cell[0], selection.current.cell[1]);
-                location = selection.current.cell;
-            }
+        let bounds: Rectangle | undefined;
+        let location: Item | undefined = undefined;
+        if (selection.current !== undefined) {
+            bounds = getBoundsForItem(canvas, selection.current.cell[0], selection.current.cell[1]);
+            location = selection.current.cell;
+        }
 
-            onKeyDown?.({
-                bounds,
-                stopPropagation: () => event.stopPropagation(),
-                preventDefault: () => event.preventDefault(),
-                cancel: () => undefined,
-                ctrlKey: event.ctrlKey,
-                metaKey: event.metaKey,
-                shiftKey: event.shiftKey,
-                altKey: event.altKey,
-                key: event.key,
-                keyCode: event.keyCode,
-                rawEvent: event,
-                location,
-            });
-        },
-        [onKeyDown, selection, getBoundsForItem]
+        onKeyDown?.({
+            bounds,
+            stopPropagation: () => event.stopPropagation(),
+            preventDefault: () => event.preventDefault(),
+            cancel: () => undefined,
+            ctrlKey: event.ctrlKey,
+            metaKey: event.metaKey,
+            shiftKey: event.shiftKey,
+            altKey: event.altKey,
+            key: event.key,
+            keyCode: event.keyCode,
+            rawEvent: event,
+            location,
+        });
+    });
+
+    const onKeyUpImpl = useStableCallback((event: React.KeyboardEvent<HTMLCanvasElement>) => {
+        const canvas = ref.current;
+        if (canvas === null) return;
+
+        let bounds: Rectangle | undefined;
+        let location: Item | undefined = undefined;
+        if (selection.current !== undefined) {
+            bounds = getBoundsForItem(canvas, selection.current.cell[0], selection.current.cell[1]);
+            location = selection.current.cell;
+        }
+
+        onKeyUp?.({
+            bounds,
+            stopPropagation: () => event.stopPropagation(),
+            preventDefault: () => event.preventDefault(),
+            cancel: () => undefined,
+            ctrlKey: event.ctrlKey,
+            metaKey: event.metaKey,
+            shiftKey: event.shiftKey,
+            altKey: event.altKey,
+            key: event.key,
+            keyCode: event.keyCode,
+            rawEvent: event,
+            location,
+        });
+    });
+
+    const customEventTarget = experimental?.eventTarget;
+    const refImpl = React.useMemo(
+        () => makeCanvasRef(ref, canvasRef, windowEventTargetRef, customEventTarget),
+        [canvasRef, customEventTarget]
     );
 
-    const onKeyUpImpl = React.useCallback(
-        (event: React.KeyboardEvent<HTMLCanvasElement>) => {
-            const canvas = ref.current;
-            if (canvas === null) return;
+    const onDragStartImpl = (event: DragEvent) => {
+        const canvas = ref.current;
+        if (canvas === null || isDraggable === false || isResizing) {
+            event.preventDefault();
+            return;
+        }
 
-            let bounds: Rectangle | undefined;
-            let location: Item | undefined = undefined;
-            if (selection.current !== undefined) {
-                bounds = getBoundsForItem(canvas, selection.current.cell[0], selection.current.cell[1]);
-                location = selection.current.cell;
-            }
+        let dragMime: string | undefined;
+        let dragData: string | undefined;
 
-            onKeyUp?.({
-                bounds,
-                stopPropagation: () => event.stopPropagation(),
-                preventDefault: () => event.preventDefault(),
-                cancel: () => undefined,
-                ctrlKey: event.ctrlKey,
-                metaKey: event.metaKey,
-                shiftKey: event.shiftKey,
-                altKey: event.altKey,
-                key: event.key,
-                keyCode: event.keyCode,
-                rawEvent: event,
-                location,
-            });
-        },
-        [onKeyUp, selection, getBoundsForItem]
-    );
+        const args = getMouseArgsForPosition(canvas, event.clientX, event.clientY);
 
-    const refImpl = React.useCallback(
-        (instance: HTMLCanvasElement | null) => {
-            ref.current = instance;
-            if (canvasRef !== undefined) {
-                canvasRef.current = instance;
-            }
+        if (isDraggable !== true && args.kind !== isDraggable) {
+            event.preventDefault();
+            return;
+        }
 
-            if (experimental?.eventTarget) {
-                windowEventTargetRef.current = experimental.eventTarget;
-            } else if (instance === null) {
-                windowEventTargetRef.current = window;
+        const setData = (mime: string, payload: string) => {
+            dragMime = mime;
+            dragData = payload;
+        };
+
+        let dragImage: Element | undefined;
+        let dragImageX: number | undefined;
+        let dragImageY: number | undefined;
+        const setDragImage = (image: Element, x: number, y: number) => {
+            dragImage = image;
+            dragImageX = x;
+            dragImageY = y;
+        };
+
+        let prevented = false;
+
+        onDragStart?.({
+            ...args,
+            setData,
+            setDragImage,
+            preventDefault: () => (prevented = true),
+            defaultPrevented: () => prevented,
+        });
+        if (!prevented && dragMime !== undefined && dragData !== undefined && event.dataTransfer !== null) {
+            event.dataTransfer.setData(dragMime, dragData);
+            event.dataTransfer.effectAllowed = "copyLink";
+
+            if (dragImage !== undefined && dragImageX !== undefined && dragImageY !== undefined) {
+                event.dataTransfer.setDragImage(dragImage, dragImageX, dragImageY);
             } else {
-                const docRoot = instance.getRootNode();
+                const [col, row] = args.location;
+                if (row !== undefined) {
+                    const offscreen = document.createElement("canvas");
+                    const boundsForDragTarget = getBoundsForItem(canvas, col, row);
 
-                if (docRoot === document) windowEventTargetRef.current = window;
-                windowEventTargetRef.current = docRoot as any;
-            }
-        },
-        [canvasRef, experimental?.eventTarget]
-    );
+                    assert(boundsForDragTarget !== undefined);
+                    const dpr = Math.ceil(window.devicePixelRatio ?? 1);
+                    offscreen.width = boundsForDragTarget.width * dpr;
+                    offscreen.height = boundsForDragTarget.height * dpr;
 
-    const onDragStartImpl = React.useCallback(
-        (event: DragEvent) => {
-            const canvas = ref.current;
-            if (canvas === null || isDraggable === false || isResizing) {
-                event.preventDefault();
-                return;
-            }
-
-            let dragMime: string | undefined;
-            let dragData: string | undefined;
-
-            const args = getMouseArgsForPosition(canvas, event.clientX, event.clientY);
-
-            if (isDraggable !== true && args.kind !== isDraggable) {
-                event.preventDefault();
-                return;
-            }
-
-            const setData = (mime: string, payload: string) => {
-                dragMime = mime;
-                dragData = payload;
-            };
-
-            let dragImage: Element | undefined;
-            let dragImageX: number | undefined;
-            let dragImageY: number | undefined;
-            const setDragImage = (image: Element, x: number, y: number) => {
-                dragImage = image;
-                dragImageX = x;
-                dragImageY = y;
-            };
-
-            let prevented = false;
-
-            onDragStart?.({
-                ...args,
-                setData,
-                setDragImage,
-                preventDefault: () => (prevented = true),
-                defaultPrevented: () => prevented,
-            });
-            if (!prevented && dragMime !== undefined && dragData !== undefined && event.dataTransfer !== null) {
-                event.dataTransfer.setData(dragMime, dragData);
-                event.dataTransfer.effectAllowed = "copyLink";
-
-                if (dragImage !== undefined && dragImageX !== undefined && dragImageY !== undefined) {
-                    event.dataTransfer.setDragImage(dragImage, dragImageX, dragImageY);
-                } else {
-                    const [col, row] = args.location;
-                    if (row !== undefined) {
-                        const offscreen = document.createElement("canvas");
-                        const boundsForDragTarget = getBoundsForItem(canvas, col, row);
-
-                        assert(boundsForDragTarget !== undefined);
-                        const dpr = Math.ceil(window.devicePixelRatio ?? 1);
-                        offscreen.width = boundsForDragTarget.width * dpr;
-                        offscreen.height = boundsForDragTarget.height * dpr;
-
-                        const ctx = offscreen.getContext("2d");
-                        if (ctx !== null) {
-                            ctx.scale(dpr, dpr);
-                            ctx.textBaseline = "middle";
-                            if (row === -1) {
-                                ctx.font = theme.headerFontFull;
-                                ctx.fillStyle = theme.bgHeader;
-                                ctx.fillRect(0, 0, offscreen.width, offscreen.height);
-                                drawHeader(
-                                    ctx,
-                                    0,
-                                    0,
-                                    boundsForDragTarget.width,
-                                    boundsForDragTarget.height,
-                                    mappedColumns[col],
-                                    false,
-                                    theme,
-                                    false,
-                                    undefined,
-                                    undefined,
-                                    false,
-                                    0,
-                                    spriteManager,
-                                    drawHeaderCallback,
-                                    false
-                                );
-                            } else {
-                                ctx.font = theme.baseFontFull;
-                                ctx.fillStyle = theme.bgCell;
-                                ctx.fillRect(0, 0, offscreen.width, offscreen.height);
-                                drawCell(
-                                    ctx,
-                                    getCellContent([col, row]),
-                                    0,
-                                    row,
-                                    false,
-                                    false,
-                                    0,
-                                    0,
-                                    boundsForDragTarget.width,
-                                    boundsForDragTarget.height,
-                                    false,
-                                    theme,
-                                    theme.bgCell,
-                                    imageLoader,
-                                    spriteManager,
-                                    1,
-                                    undefined,
-                                    false,
-                                    0,
-                                    undefined,
-                                    undefined,
-                                    undefined,
-                                    renderStateProvider,
-                                    getCellRenderer,
-                                    () => undefined
-                                );
-                            }
+                    const ctx = offscreen.getContext("2d");
+                    if (ctx !== null) {
+                        ctx.scale(dpr, dpr);
+                        ctx.textBaseline = "middle";
+                        if (row === -1) {
+                            ctx.font = theme.headerFontFull;
+                            ctx.fillStyle = theme.bgHeader;
+                            ctx.fillRect(0, 0, offscreen.width, offscreen.height);
+                            drawHeader(
+                                ctx,
+                                0,
+                                0,
+                                boundsForDragTarget.width,
+                                boundsForDragTarget.height,
+                                mappedColumns[col],
+                                false,
+                                theme,
+                                false,
+                                undefined,
+                                undefined,
+                                false,
+                                0,
+                                spriteManager,
+                                drawHeaderCallback,
+                                false
+                            );
+                        } else {
+                            ctx.font = theme.baseFontFull;
+                            ctx.fillStyle = theme.bgCell;
+                            ctx.fillRect(0, 0, offscreen.width, offscreen.height);
+                            drawCell(
+                                ctx,
+                                getCellContent([col, row]),
+                                0,
+                                row,
+                                false,
+                                false,
+                                0,
+                                0,
+                                boundsForDragTarget.width,
+                                boundsForDragTarget.height,
+                                false,
+                                theme,
+                                theme.bgCell,
+                                imageLoader,
+                                spriteManager,
+                                1,
+                                undefined,
+                                false,
+                                0,
+                                undefined,
+                                undefined,
+                                undefined,
+                                renderStateProvider,
+                                getCellRenderer,
+                                () => undefined
+                            );
                         }
-
-                        offscreen.style.left = "-100%";
-                        offscreen.style.position = "absolute";
-                        offscreen.style.width = `${boundsForDragTarget.width}px`;
-                        offscreen.style.height = `${boundsForDragTarget.height}px`;
-
-                        document.body.append(offscreen);
-
-                        event.dataTransfer.setDragImage(
-                            offscreen,
-                            boundsForDragTarget.width / 2,
-                            boundsForDragTarget.height / 2
-                        );
-
-                        window.setTimeout(() => {
-                            offscreen.remove();
-                        }, 0);
                     }
+
+                    offscreen.style.left = "-100%";
+                    offscreen.style.position = "absolute";
+                    offscreen.style.width = `${boundsForDragTarget.width}px`;
+                    offscreen.style.height = `${boundsForDragTarget.height}px`;
+
+                    document.body.append(offscreen);
+
+                    event.dataTransfer.setDragImage(
+                        offscreen,
+                        boundsForDragTarget.width / 2,
+                        boundsForDragTarget.height / 2
+                    );
+
+                    window.setTimeout(() => {
+                        offscreen.remove();
+                    }, 0);
                 }
-            } else {
-                event.preventDefault();
             }
-        },
-        [
-            isDraggable,
-            isResizing,
-            getMouseArgsForPosition,
-            onDragStart,
-            getBoundsForItem,
-            theme,
-            mappedColumns,
-            spriteManager,
-            drawHeaderCallback,
-            getCellContent,
-            imageLoader,
-            renderStateProvider,
-            getCellRenderer,
-        ]
-    );
+        } else {
+            event.preventDefault();
+        }
+    };
     useEventListener("dragstart", onDragStartImpl, eventTargetRef?.current ?? null, false, false);
 
     const activeDropTarget = React.useRef<Item | undefined>();
 
-    const onDragOverImpl = React.useCallback(
-        (event: DragEvent) => {
-            const canvas = ref.current;
-            if (onDrop !== undefined) {
-                // Need to preventDefault to allow drop
-                event.preventDefault();
-            }
+    const onDragOverImpl = (event: DragEvent) => {
+        const canvas = ref.current;
+        if (onDrop !== undefined) {
+            // Need to preventDefault to allow drop
+            event.preventDefault();
+        }
 
-            if (canvas === null || onDragOverCell === undefined) {
-                return;
-            }
+        if (canvas === null || onDragOverCell === undefined) {
+            return;
+        }
 
-            const args = getMouseArgsForPosition(canvas, event.clientX, event.clientY);
+        const args = getMouseArgsForPosition(canvas, event.clientX, event.clientY);
 
-            const [rawCol, row] = args.location;
-            const col = rawCol - (firstColAccessible ? 0 : 1);
-            const [activeCol, activeRow] = activeDropTarget.current ?? [];
+        const [rawCol, row] = args.location;
+        const col = rawCol - (firstColAccessible ? 0 : 1);
+        const [activeCol, activeRow] = activeDropTarget.current ?? [];
 
-            if (activeCol !== col || activeRow !== row) {
-                activeDropTarget.current = [col, row];
-                onDragOverCell([col, row], event.dataTransfer);
-            }
-        },
-        [firstColAccessible, getMouseArgsForPosition, onDragOverCell, onDrop]
-    );
+        if (activeCol !== col || activeRow !== row) {
+            activeDropTarget.current = [col, row];
+            onDragOverCell([col, row], event.dataTransfer);
+        }
+    };
     useEventListener("dragover", onDragOverImpl, eventTargetRef?.current ?? null, false, false);
 
-    const onDragEndImpl = React.useCallback(() => {
+    const onDragEndImpl = () => {
         activeDropTarget.current = undefined;
         onDragEnd?.();
-    }, [onDragEnd]);
+    };
     useEventListener("dragend", onDragEndImpl, eventTargetRef?.current ?? null, false, false);
 
-    const onDropImpl = React.useCallback(
-        (event: DragEvent) => {
-            const canvas = ref.current;
-            if (canvas === null || onDrop === undefined) {
-                return;
-            }
+    const onDropImpl = (event: DragEvent) => {
+        const canvas = ref.current;
+        if (canvas === null || onDrop === undefined) {
+            return;
+        }
 
-            // Default can mess up sometimes.
-            event.preventDefault();
+        // Default can mess up sometimes.
+        event.preventDefault();
 
-            const args = getMouseArgsForPosition(canvas, event.clientX, event.clientY);
+        const args = getMouseArgsForPosition(canvas, event.clientX, event.clientY);
 
-            const [rawCol, row] = args.location;
-            const col = rawCol - (firstColAccessible ? 0 : 1);
+        const [rawCol, row] = args.location;
+        const col = rawCol - (firstColAccessible ? 0 : 1);
 
-            onDrop([col, row], event.dataTransfer);
-        },
-        [firstColAccessible, getMouseArgsForPosition, onDrop]
-    );
+        onDrop([col, row], event.dataTransfer);
+    };
     useEventListener("drop", onDropImpl, eventTargetRef?.current ?? null, false, false);
 
-    const onDragLeaveImpl = React.useCallback(() => {
+    const onDragLeaveImpl = () => {
         onDragLeave?.();
-    }, [onDragLeave]);
+    };
     useEventListener("dragleave", onDragLeaveImpl, eventTargetRef?.current ?? null, false, false);
 
     const selectionRef = React.useRef(selection);
     selectionRef.current = selection;
     const focusRef = React.useRef<HTMLElement | null>(null);
-    const focusElement = React.useCallback(
-        (el: HTMLElement | null) => {
-            // We don't want to steal the focus if we don't currently own the focus.
-            if (ref.current === null || !ref.current.contains(document.activeElement)) return;
-            if (el === null && selectionRef.current.current !== undefined) {
+    const focusElement = React.useMemo(() => makeFocusElement(ref, canvasRef, selectionRef, focusRef), [canvasRef]);
+
+    const handle: DataGridRef = {
+        focus: () => {
+            const el = focusRef.current;
+            // The element in the ref may have been removed however our callback method ref
+            // won't see the removal so bad things happen. Checking to see if the element is
+            // no longer attached is enough to resolve the problem. In the future this
+            // should be replaced with something much more robust.
+            if (el === null || !document.contains(el)) {
                 canvasRef?.current?.focus({
                     preventScroll: true,
                 });
-            } else if (el !== null) {
+            } else {
                 el.focus({
                     preventScroll: true,
                 });
             }
-            focusRef.current = el;
         },
-        [canvasRef]
-    );
+        getBounds: (col?: number, row?: number) => {
+            if (canvasRef === undefined || canvasRef.current === null) {
+                return undefined;
+            }
 
-    React.useImperativeHandle(
-        forwardedRef,
-        () => ({
-            focus: () => {
-                const el = focusRef.current;
-                // The element in the ref may have been removed however our callback method ref
-                // won't see the removal so bad things happen. Checking to see if the element is
-                // no longer attached is enough to resolve the problem. In the future this
-                // should be replaced with something much more robust.
-                if (el === null || !document.contains(el)) {
-                    canvasRef?.current?.focus({
-                        preventScroll: true,
-                    });
-                } else {
-                    el.focus({
-                        preventScroll: true,
-                    });
-                }
-            },
-            getBounds: (col?: number, row?: number) => {
-                if (canvasRef === undefined || canvasRef.current === null) {
-                    return undefined;
-                }
+            return getBoundsForItem(canvasRef.current, col ?? 0, row ?? -1);
+        },
+        damage,
+        getMouseArgsForPosition: (posX: number, posY: number, ev?: MouseEvent | TouchEvent) => {
+            if (canvasRef === undefined || canvasRef.current === null) {
+                return undefined;
+            }
 
-                return getBoundsForItem(canvasRef.current, col ?? 0, row ?? -1);
-            },
-            damage,
-            getMouseArgsForPosition: (posX: number, posY: number, ev?: MouseEvent | TouchEvent) => {
-                if (canvasRef === undefined || canvasRef.current === null) {
-                    return undefined;
-                }
-
-                return getMouseArgsForPosition(canvasRef.current, posX, posY, ev);
-            },
-        }),
-        [canvasRef, damage, getBoundsForItem, getMouseArgsForPosition]
-    );
+            return getMouseArgsForPosition(canvasRef.current, posX, posY, ev);
+        },
+    };
+    // The forwarded handle keeps one identity and calls into the latest render.
+    const latestHandle = useLatest(handle);
+    React.useImperativeHandle(forwardedRef, () => forwardDataGridRef(latestHandle), [latestHandle]);
 
     const lastFocusedSubdomNode = React.useRef<Item>();
+
+    // The accessibility tree is kept between renders, so its handlers are bound to these instead of to a render.
+    const onAccessibleHeaderFocus = useStableCallback((focusTarget: EventTarget, col: number) => {
+        if (focusTarget === focusRef.current) return;
+        onCellFocused?.([col, -1]);
+    });
+    const onAccessibleCellClick = useStableCallback((location: Item) => {
+        const canvas = canvasRef?.current;
+        if (canvas === null || canvas === undefined) return;
+        onKeyDown?.({
+            bounds: getBoundsForItem(canvas, location[0], location[1]),
+            cancel: () => undefined,
+            preventDefault: () => undefined,
+            stopPropagation: () => undefined,
+            ctrlKey: false,
+            key: "Enter",
+            keyCode: 13,
+            metaKey: false,
+            shiftKey: false,
+            altKey: false,
+            rawEvent: undefined,
+            location,
+        });
+    });
+    const onAccessibleCellFocus = useStableCallback((focusTarget: EventTarget, location: Item) => {
+        if (
+            focusTarget === focusRef.current ||
+            (lastFocusedSubdomNode.current?.[0] === location[0] && lastFocusedSubdomNode.current?.[1] === location[1])
+        )
+            return;
+        lastFocusedSubdomNode.current = location;
+        onCellFocused?.(location);
+    });
 
     const accessibilityTree = useDebouncedMemo(
         () => {
@@ -1781,10 +1837,7 @@ const DataGrid: React.ForwardRefRenderFunction<DataGridRef, DataGridProps> = (p,
                                     aria-selected={selection.columns.hasIndex(c.sourceIndex)}
                                     aria-colindex={c.sourceIndex + 1 + colOffset}
                                     tabIndex={-1}
-                                    onFocus={e => {
-                                        if (e.target === focusRef.current) return;
-                                        return onCellFocused?.([c.sourceIndex, -1]);
-                                    }}
+                                    onFocus={bindFocus(onAccessibleHeaderFocus, c.sourceIndex)}
                                     key={c.sourceIndex}>
                                     {c.title}
                                 </th>
@@ -1822,34 +1875,8 @@ const DataGrid: React.ForwardRefRenderFunction<DataGridRef, DataGridProps> = (p,
                                             }
                                             id={id}
                                             data-testid={id}
-                                            onClick={() => {
-                                                const canvas = canvasRef?.current;
-                                                if (canvas === null || canvas === undefined) return;
-                                                return onKeyDown?.({
-                                                    bounds: getBoundsForItem(canvas, col, row),
-                                                    cancel: () => undefined,
-                                                    preventDefault: () => undefined,
-                                                    stopPropagation: () => undefined,
-                                                    ctrlKey: false,
-                                                    key: "Enter",
-                                                    keyCode: 13,
-                                                    metaKey: false,
-                                                    shiftKey: false,
-                                                    altKey: false,
-                                                    rawEvent: undefined,
-                                                    location,
-                                                });
-                                            }}
-                                            onFocusCapture={e => {
-                                                if (
-                                                    e.target === focusRef.current ||
-                                                    (lastFocusedSubdomNode.current?.[0] === col &&
-                                                        lastFocusedSubdomNode.current?.[1] === row)
-                                                )
-                                                    return;
-                                                lastFocusedSubdomNode.current = location;
-                                                return onCellFocused?.(location);
-                                            }}
+                                            onClick={bindClick(onAccessibleCellClick, location)}
+                                            onFocusCapture={bindFocus(onAccessibleCellFocus, location)}
                                             ref={focused ? focusElement : undefined}
                                             tabIndex={-1}>
                                             {getRowData(cellContent, getCellRenderer)}
@@ -1874,10 +1901,9 @@ const DataGrid: React.ForwardRefRenderFunction<DataGridRef, DataGridProps> = (p,
             selection,
             focusElement,
             getCellContent,
-            canvasRef,
-            onKeyDown,
-            getBoundsForItem,
-            onCellFocused,
+            onAccessibleHeaderFocus,
+            onAccessibleCellClick,
+            onAccessibleCellFocus,
         ],
         200
     );

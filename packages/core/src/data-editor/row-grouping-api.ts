@@ -1,6 +1,13 @@
 import React from "react";
 import type { Item } from "../internal/data-grid/data-grid-types.js";
-import { flattenRowGroups, mapRowIndexToPath, type RowGroup, type RowGroupingOptions, type MapResult } from "./row-grouping.js";
+import {
+    flattenRowGroups,
+    mapRowIndexToPath,
+    type FlattenedRowGroup,
+    type RowGroup,
+    type RowGroupingOptions,
+    type MapResult,
+} from "./row-grouping.js";
 
 export interface RowGroupingMapperResult<T> extends Omit<MapResult, 'originalIndex'> {
     path: readonly number[];
@@ -30,23 +37,27 @@ export function useRowGrouping(options: RowGroupingOptions | undefined, rows: nu
         [options, rows]
     );
 
+    const mapper = React.useMemo(() => makeMapper(flattenedRowGroups), [flattenedRowGroups]);
+
     return {
         getRowGroupingForPath,
         updateRowGroupingByPath,
-        mapper: React.useCallback<UseRowGroupingResult["mapper"]>(
-            (itemOrRow: number | Item) => {
-                if (typeof itemOrRow === "number") {
-                    return mapRowIndexToPath(itemOrRow, flattenedRowGroups);
-                }
-                const r = mapRowIndexToPath(itemOrRow[1], flattenedRowGroups);
-                return {
-                    ...r,
-                    originalIndex: [itemOrRow[0], r.originalIndex],
-                } as any; // FIXME
-            },
-            [flattenedRowGroups]
-        ),
+        mapper,
     };
+}
+
+// Module level so that the mapper holds its argument and nothing from a render.
+function makeMapper(flattenedRowGroups: readonly FlattenedRowGroup[] | undefined): RowGroupingMapper {
+    return ((itemOrRow: number | Item) => {
+        if (typeof itemOrRow === "number") {
+            return mapRowIndexToPath(itemOrRow, flattenedRowGroups);
+        }
+        const r = mapRowIndexToPath(itemOrRow[1], flattenedRowGroups);
+        return {
+            ...r,
+            originalIndex: [itemOrRow[0], r.originalIndex],
+        };
+    }) as any; // FIXME
 }
 
 export function updateRowGroupingByPath(

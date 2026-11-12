@@ -131,24 +131,32 @@ export const Checkmark: React.FunctionComponent<Partial<SpriteProps>> = (props: 
     );
 };
 
+// The two functions below are module level so that what they return holds its arguments and nothing from a render.
+function markUnmounted(mountedRef: React.MutableRefObject<boolean>): () => void {
+    return () => {
+        mountedRef.current = false;
+    };
+}
+
+function debounceWhileMounted<T>(
+    mountedRef: React.MutableRefObject<boolean>,
+    setState: React.Dispatch<React.SetStateAction<T>>,
+    time: number
+): React.Dispatch<React.SetStateAction<T>> {
+    return debounce((x: React.SetStateAction<T>) => {
+        if (mountedRef.current) {
+            setState(x);
+        }
+    }, time);
+}
+
 export function useDebouncedMemo<T>(factory: () => T, deps: React.DependencyList | undefined, time: number): T {
     const [state, setState] = React.useState(factory);
 
     const mountedRef = React.useRef(true);
-    React.useEffect(
-        () => () => {
-            mountedRef.current = false;
-        },
-        []
-    );
+    React.useEffect(() => markUnmounted(mountedRef), []);
 
-    const debouncedSetState = React.useRef<typeof setState>(
-        debounce(x => {
-            if (mountedRef.current) {
-                setState(x);
-            }
-        }, time)
-    );
+    const [debouncedSetState] = React.useState(() => ({ current: debounceWhileMounted(mountedRef, setState, time) }));
 
     React.useLayoutEffect(() => {
         if (mountedRef.current) {
@@ -228,7 +236,18 @@ export function useStateWithReactiveInput<T>(inputState: T): [T, React.Dispatch<
     const [state, setState] = React.useState(inputState);
     // crimes against humanity here
     const [, forceRender] = React.useState<{} | undefined>();
-    const setStateOuter = React.useCallback<typeof setState>(nv => {
+    const [[setStateOuter, onEmpty]] = React.useState(() => makeReactiveSetters(inputStateRef, setState, forceRender));
+
+    return [inputStateRef.current[0] === empty ? state : inputStateRef.current[0], setStateOuter, onEmpty];
+}
+
+// Module level so that the returned functions hold their arguments and nothing from a render.
+function makeReactiveSetters<T>(
+    inputStateRef: React.MutableRefObject<[T | typeof empty, T]>,
+    setState: React.Dispatch<React.SetStateAction<T>>,
+    forceRender: (value: {}) => void
+): readonly [React.Dispatch<React.SetStateAction<T>>, () => void] {
+    const setStateOuter: React.Dispatch<React.SetStateAction<T>> = nv => {
         // this takes care of the case where the inputState was set, then setState gets called again but back to what
         // the state was before the inputState changed. Since the useState effect wont trigger a render in this case
         // we need to be very naughty and force it to see the change. Technically this may not be needed some chunk of
@@ -246,14 +265,14 @@ export function useStateWithReactiveInput<T>(inputState: T): [T, React.Dispatch<
             return nv;
         });
         inputStateRef.current[0] = empty;
-    }, []);
+    };
 
-    const onEmpty = React.useCallback(() => {
+    const onEmpty = () => {
         inputStateRef.current[0] = empty;
         forceRender({});
-    }, []);
+    };
 
-    return [inputStateRef.current[0] === empty ? state : inputStateRef.current[0], setStateOuter, onEmpty];
+    return [setStateOuter, onEmpty];
 }
 
 export function makeAccessibilityStringForArray(arr: readonly string[]): string {

@@ -21,6 +21,11 @@ interface DataEditorProps {
     remSize: number;
 }
 
+// Module level so that the returned function holds its arguments and nothing from a render.
+function scaleRowHeight(rowHeight: (n: number) => number, scaler: number): (n: number) => number {
+    return n => Math.ceil(rowHeight(n) * scaler);
+}
+
 export function useRemAdjuster({
     rowHeight: rowHeightIn,
     headerHeight: headerHeightIn,
@@ -38,7 +43,7 @@ export function useRemAdjuster({
         const rh = rowHeightIn;
         const bt = getDataEditorTheme();
         return [
-            typeof rh === "number" ? rh * scaler : (n: number) => Math.ceil(rh(n) * scaler),
+            typeof rh === "number" ? rh * scaler : scaleRowHeight(rh, scaler),
             Math.ceil(headerHeightIn * scaler),
             Math.ceil(groupHeaderHeightIn * scaler),
             {

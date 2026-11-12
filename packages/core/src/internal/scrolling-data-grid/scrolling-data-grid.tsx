@@ -71,57 +71,39 @@ export interface ScrollingDataGridProps extends Props {
     readonly nonGrowWidth: number;
 }
 
-const GridScroller: React.FunctionComponent<ScrollingDataGridProps> = p => {
+type ScrollArgs = Rectangle & { paddingRight: number };
+
+// The two functions below are module level so that what they return holds its arguments and nothing from a render.
+// The scroller reprocesses its position whenever they change identity, so they are rebuilt when their inputs change.
+function makeProcessArgs(inputs: {
+    readonly columns: ScrollingDataGridProps["columns"];
+    readonly rowHeight: ScrollingDataGridProps["rowHeight"];
+    readonly rows: number;
+    readonly onVisibleRegionChanged: ScrollingDataGridProps["onVisibleRegionChanged"];
+    readonly freezeColumns: number;
+    readonly smoothScrollX: boolean;
+    readonly smoothScrollY: boolean;
+    readonly lastArgs: React.MutableRefObject<ScrollArgs | undefined>;
+    readonly last: React.MutableRefObject<Rectangle | undefined>;
+    readonly lastX: React.MutableRefObject<number | undefined>;
+    readonly lastY: React.MutableRefObject<number | undefined>;
+    readonly lastSize: React.MutableRefObject<readonly [number, number] | undefined>;
+}): () => void {
     const {
         columns,
-        rows,
         rowHeight,
-        headerHeight,
-        groupHeaderHeight,
-        enableGroups,
-        freezeColumns,
-        experimental,
-        nonGrowWidth,
-        clientSize,
-        className,
+        rows,
         onVisibleRegionChanged,
-        scrollRef,
-        onScrollProcessed,
-        preventDiagonalScrolling,
-        rightElement,
-        rightElementProps,
-        overscrollX,
-        overscrollY,
-        initialSize,
-        smoothScrollX = false,
-        smoothScrollY = false,
-        isDraggable,
-    } = p;
-    const { paddingRight, paddingBottom } = experimental ?? {};
-
-    const [clientWidth, clientHeight] = clientSize;
-    const last = React.useRef<Rectangle | undefined>();
-    const lastX = React.useRef<number | undefined>();
-    const lastY = React.useRef<number | undefined>();
-    const lastSize = React.useRef<readonly [number, number] | undefined>();
-
-    const width = nonGrowWidth + Math.max(0, overscrollX ?? 0);
-
-    let height = enableGroups ? headerHeight + groupHeaderHeight : headerHeight;
-    if (typeof rowHeight === "number") {
-        height += rows * rowHeight;
-    } else {
-        for (let r = 0; r < rows; r++) {
-            height += rowHeight(r);
-        }
-    }
-    if (overscrollY !== undefined) {
-        height += overscrollY;
-    }
-
-    const lastArgs = React.useRef<Rectangle & { paddingRight: number }>();
-
-    const processArgs = React.useCallback(() => {
+        freezeColumns,
+        smoothScrollX,
+        smoothScrollY,
+        lastArgs,
+        last,
+        lastX,
+        lastY,
+        lastSize,
+    } = inputs;
+    return () => {
         if (lastArgs.current === undefined) return;
         const args = { ...lastArgs.current };
 
@@ -240,15 +222,89 @@ const GridScroller: React.FunctionComponent<ScrollingDataGridProps> = p => {
             lastY.current = ty;
             lastSize.current = [args.width, args.height];
         }
-    }, [columns, rowHeight, rows, onVisibleRegionChanged, freezeColumns, smoothScrollX, smoothScrollY]);
+    };
+}
 
-    const onScrollUpdate = React.useCallback(
-        (args: Rectangle & { paddingRight: number }) => {
-            lastArgs.current = args;
-            processArgs();
-        },
-        [processArgs]
+function makeOnScrollUpdate(
+    lastArgs: React.MutableRefObject<ScrollArgs | undefined>,
+    processArgs: () => void
+): (args: ScrollArgs) => void {
+    return args => {
+        lastArgs.current = args;
+        processArgs();
+    };
+}
+
+const GridScroller: React.FunctionComponent<ScrollingDataGridProps> = p => {
+    const {
+        columns,
+        rows,
+        rowHeight,
+        headerHeight,
+        groupHeaderHeight,
+        enableGroups,
+        freezeColumns,
+        experimental,
+        nonGrowWidth,
+        clientSize,
+        className,
+        onVisibleRegionChanged,
+        scrollRef,
+        onScrollProcessed,
+        preventDiagonalScrolling,
+        rightElement,
+        rightElementProps,
+        overscrollX,
+        overscrollY,
+        initialSize,
+        smoothScrollX = false,
+        smoothScrollY = false,
+        isDraggable,
+    } = p;
+    const { paddingRight, paddingBottom } = experimental ?? {};
+
+    const [clientWidth, clientHeight] = clientSize;
+    const last = React.useRef<Rectangle | undefined>();
+    const lastX = React.useRef<number | undefined>();
+    const lastY = React.useRef<number | undefined>();
+    const lastSize = React.useRef<readonly [number, number] | undefined>();
+
+    const width = nonGrowWidth + Math.max(0, overscrollX ?? 0);
+
+    let height = enableGroups ? headerHeight + groupHeaderHeight : headerHeight;
+    if (typeof rowHeight === "number") {
+        height += rows * rowHeight;
+    } else {
+        for (let r = 0; r < rows; r++) {
+            height += rowHeight(r);
+        }
+    }
+    if (overscrollY !== undefined) {
+        height += overscrollY;
+    }
+
+    const lastArgs = React.useRef<ScrollArgs>();
+
+    const processArgs = React.useMemo(
+        () =>
+            makeProcessArgs({
+                columns,
+                rowHeight,
+                rows,
+                onVisibleRegionChanged,
+                freezeColumns,
+                smoothScrollX,
+                smoothScrollY,
+                lastArgs,
+                last,
+                lastX,
+                lastY,
+                lastSize,
+            }),
+        [columns, rowHeight, rows, onVisibleRegionChanged, freezeColumns, smoothScrollX, smoothScrollY]
     );
+
+    const onScrollUpdate = React.useMemo(() => makeOnScrollUpdate(lastArgs, processArgs), [processArgs]);
 
     React.useEffect(() => {
         processArgs();

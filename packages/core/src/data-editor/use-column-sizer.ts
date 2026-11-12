@@ -56,6 +56,14 @@ export function measureColumn(
     };
 }
 
+// Module level so that the cleanup holds the canvas and nothing from a render.
+function attachToDocument(canvas: HTMLCanvasElement | null): () => void {
+    if (canvas) document.documentElement.append(canvas);
+    return () => {
+        canvas?.remove();
+    };
+}
+
 /** @category Hooks */
 export function useColumnSizer(
     columns: readonly GridColumn[],
@@ -87,12 +95,7 @@ export function useColumnSizer(
         return [offscreen, offscreen.getContext("2d", { alpha: false })];
     }, []);
 
-    React.useLayoutEffect(() => {
-        if (canvas) document.documentElement.append(canvas);
-        return () => {
-            canvas?.remove();
-        };
-    }, [canvas]);
+    React.useLayoutEffect(() => attachToDocument(canvas), [canvas]);
 
     const memoMap = React.useRef<Record<string, number>>({});
 

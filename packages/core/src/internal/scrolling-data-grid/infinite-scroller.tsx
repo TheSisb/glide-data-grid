@@ -91,12 +91,13 @@ function useTouchUpDelayed(delay: number): boolean {
 
     const cbTimer = React.useRef(0);
 
+    // useEventListener keeps only the handler of the latest render.
     useEventListener(
         "touchstart",
-        React.useCallback(() => {
+        () => {
             window.clearTimeout(cbTimer.current);
             setHasTouches(true);
-        }, []),
+        },
         safeWindow,
         true,
         false
@@ -104,20 +105,152 @@ function useTouchUpDelayed(delay: number): boolean {
 
     useEventListener(
         "touchend",
-        React.useCallback(
-            e => {
-                if (e.touches.length === 0) {
-                    cbTimer.current = window.setTimeout(() => setHasTouches(false), delay);
-                }
-            },
-            [delay]
-        ),
+        e => {
+            if (e.touches.length === 0) {
+                cbTimer.current = window.setTimeout(() => setHasTouches(false), delay);
+            }
+        },
         safeWindow,
         true,
         false
     );
 
     return hasTouches;
+}
+
+// The two functions below are module level so that what they return holds its arguments and nothing from a render.
+// The scroller reprocesses its position whenever onScroll changes identity, so it is rebuilt when its inputs change.
+function makeOnScroll(inputs: {
+    readonly paddingBottom: number;
+    readonly paddingRight: number;
+    readonly scrollHeight: number;
+    readonly update: Props["update"];
+    readonly onScrollProcessed: Props["onScrollProcessed"];
+    readonly preventDiagonalScrolling: boolean;
+    readonly hasTouches: boolean;
+    readonly scroller: React.MutableRefObject<HTMLDivElement | null>;
+    readonly lastScrollPosition: React.MutableRefObject<{
+        scrollLeft: number;
+        scrollTop: number;
+        lockDirection: ScrollLock;
+    }>;
+    readonly lastScrollY: React.MutableRefObject<number>;
+    readonly virtualScrollY: React.MutableRefObject<number>;
+    readonly idleTimer: React.MutableRefObject<number>;
+    readonly rightWrapRef: React.MutableRefObject<HTMLDivElement | null>;
+    readonly setIsIdle: (isIdle: boolean) => void;
+}): (scrollLeft?: number, scrollTop?: number) => void {
+    const {
+        paddingBottom,
+        paddingRight,
+        scrollHeight,
+        update,
+        onScrollProcessed,
+        preventDiagonalScrolling,
+        hasTouches,
+        scroller,
+        lastScrollPosition,
+        lastScrollY,
+        virtualScrollY,
+        idleTimer,
+        rightWrapRef,
+        setIsIdle,
+    } = inputs;
+    return (scrollLeft?: number, scrollTop?: number) => {
+        const el = scroller.current;
+        if (el === null) return;
+
+        scrollTop = scrollTop ?? el.scrollTop;
+        scrollLeft = scrollLeft ?? el.scrollLeft;
+        const lastScrollTop = lastScrollPosition.current.scrollTop;
+        const lastScrollLeft = lastScrollPosition.current.scrollLeft;
+
+        const dx = scrollLeft - lastScrollLeft;
+        const dy = scrollTop - lastScrollTop;
+
+        if (
+            hasTouches &&
+            dx !== 0 &&
+            dy !== 0 &&
+            (Math.abs(dx) > 3 || Math.abs(dy) > 3) &&
+            preventDiagonalScrolling &&
+            lastScrollPosition.current.lockDirection === undefined
+        ) {
+            lastScrollPosition.current.lockDirection =
+                Math.abs(dx) < Math.abs(dy) ? [lastScrollLeft, undefined] : [undefined, lastScrollTop];
+        }
+
+        const lock = lastScrollPosition.current.lockDirection;
+
+        scrollLeft = lock?.[0] ?? scrollLeft;
+        scrollTop = lock?.[1] ?? scrollTop;
+        lastScrollPosition.current.scrollLeft = scrollLeft;
+        lastScrollPosition.current.scrollTop = scrollTop;
+
+        const cWidth = el.clientWidth;
+        const cHeight = el.clientHeight;
+
+        const newY = scrollTop;
+        const delta = lastScrollY.current - newY;
+        const scrollableHeight = el.scrollHeight - cHeight;
+        lastScrollY.current = newY;
+
+        // Calculate the virtual Y position
+        let virtualY: number;
+
+        // When content height exceeds browser limits, use hybrid approach
+        if (scrollableHeight > 0 && scrollHeight > el.scrollHeight + 5) {
+            // For large jumps (scrollbar interaction) or edge positions,
+            // recalculate position based on percentage
+            if (Math.abs(delta) > 2000 || newY === 0 || newY === scrollableHeight) {
+                const scrollProgress = Math.max(0, Math.min(1, newY / scrollableHeight));
+                const virtualScrollableHeight = scrollHeight - cHeight;
+                virtualY = scrollProgress * virtualScrollableHeight;
+                // Update our tracked position for subsequent smooth scrolling
+                virtualScrollY.current = virtualY;
+            } else {
+                // For smooth scrolling, apply the delta directly to virtual position
+                // This preserves 1:1 pixel movement for smooth scrolling
+                virtualScrollY.current -= delta;
+                virtualY = virtualScrollY.current;
+            }
+        } else {
+            // Direct mapping when within browser limits
+            virtualY = newY;
+            virtualScrollY.current = virtualY;
+        }
+
+        // Ensure virtual Y is within valid bounds
+        virtualY = Math.max(0, Math.min(virtualY, scrollHeight - cHeight));
+        virtualScrollY.current = virtualY; // Keep tracked position in bounds too
+
+        if (lock !== undefined) {
+            window.clearTimeout(idleTimer.current);
+            setIsIdle(false);
+            idleTimer.current = window.setTimeout(() => setIsIdle(true), 200);
+        }
+
+        update({
+            x: scrollLeft,
+            y: virtualY,
+            width: cWidth - paddingRight,
+            height: cHeight - paddingBottom,
+            paddingRight: rightWrapRef.current?.clientWidth ?? 0,
+        });
+        onScrollProcessed?.(el.scrollLeft, el.scrollTop);
+    };
+}
+
+function makeSetRefs(
+    scroller: React.MutableRefObject<HTMLDivElement | null>,
+    scrollRef: React.MutableRefObject<HTMLDivElement | null> | undefined
+): (instance: HTMLDivElement | null) => void {
+    return instance => {
+        scroller.current = instance;
+        if (scrollRef !== undefined) {
+            scrollRef.current = instance;
+        }
+    };
 }
 
 /**
@@ -201,90 +334,24 @@ export const InfiniteScroller: React.FC<Props> = p => {
         lastScrollPosition.current.lockDirection = undefined;
     }, [hasTouches, isIdle]);
 
-    const onScroll = React.useCallback(
-        (scrollLeft?: number, scrollTop?: number) => {
-            const el = scroller.current;
-            if (el === null) return;
-
-            scrollTop = scrollTop ?? el.scrollTop;
-            scrollLeft = scrollLeft ?? el.scrollLeft;
-            const lastScrollTop = lastScrollPosition.current.scrollTop;
-            const lastScrollLeft = lastScrollPosition.current.scrollLeft;
-
-            const dx = scrollLeft - lastScrollLeft;
-            const dy = scrollTop - lastScrollTop;
-
-            if (
-                hasTouches &&
-                dx !== 0 &&
-                dy !== 0 &&
-                (Math.abs(dx) > 3 || Math.abs(dy) > 3) &&
-                preventDiagonalScrolling &&
-                lastScrollPosition.current.lockDirection === undefined
-            ) {
-                lastScrollPosition.current.lockDirection =
-                    Math.abs(dx) < Math.abs(dy) ? [lastScrollLeft, undefined] : [undefined, lastScrollTop];
-            }
-
-            const lock = lastScrollPosition.current.lockDirection;
-
-            scrollLeft = lock?.[0] ?? scrollLeft;
-            scrollTop = lock?.[1] ?? scrollTop;
-            lastScrollPosition.current.scrollLeft = scrollLeft;
-            lastScrollPosition.current.scrollTop = scrollTop;
-
-            const cWidth = el.clientWidth;
-            const cHeight = el.clientHeight;
-
-            const newY = scrollTop;
-            const delta = lastScrollY.current - newY;
-            const scrollableHeight = el.scrollHeight - cHeight;
-            lastScrollY.current = newY;
-
-            // Calculate the virtual Y position
-            let virtualY: number;
-
-            // When content height exceeds browser limits, use hybrid approach
-            if (scrollableHeight > 0 && scrollHeight > el.scrollHeight + 5) {
-                // For large jumps (scrollbar interaction) or edge positions,
-                // recalculate position based on percentage
-                if (Math.abs(delta) > 2000 || newY === 0 || newY === scrollableHeight) {
-                    const scrollProgress = Math.max(0, Math.min(1, newY / scrollableHeight));
-                    const virtualScrollableHeight = scrollHeight - cHeight;
-                    virtualY = scrollProgress * virtualScrollableHeight;
-                    // Update our tracked position for subsequent smooth scrolling
-                    virtualScrollY.current = virtualY;
-                } else {
-                    // For smooth scrolling, apply the delta directly to virtual position
-                    // This preserves 1:1 pixel movement for smooth scrolling
-                    virtualScrollY.current -= delta;
-                    virtualY = virtualScrollY.current;
-                }
-            } else {
-                // Direct mapping when within browser limits
-                virtualY = newY;
-                virtualScrollY.current = virtualY;
-            }
-
-            // Ensure virtual Y is within valid bounds
-            virtualY = Math.max(0, Math.min(virtualY, scrollHeight - cHeight));
-            virtualScrollY.current = virtualY; // Keep tracked position in bounds too
-
-            if (lock !== undefined) {
-                window.clearTimeout(idleTimer.current);
-                setIsIdle(false);
-                idleTimer.current = window.setTimeout(() => setIsIdle(true), 200);
-            }
-
-            update({
-                x: scrollLeft,
-                y: virtualY,
-                width: cWidth - paddingRight,
-                height: cHeight - paddingBottom,
-                paddingRight: rightWrapRef.current?.clientWidth ?? 0,
-            });
-            onScrollProcessed?.(el.scrollLeft, el.scrollTop);
-        },
+    const onScroll = React.useMemo(
+        () =>
+            makeOnScroll({
+                paddingBottom,
+                paddingRight,
+                scrollHeight,
+                update,
+                onScrollProcessed,
+                preventDiagonalScrolling,
+                hasTouches,
+                scroller,
+                lastScrollPosition,
+                lastScrollY,
+                virtualScrollY,
+                idleTimer,
+                rightWrapRef,
+                setIsIdle,
+            }),
         [paddingBottom, paddingRight, scrollHeight, update, onScrollProcessed, preventDiagonalScrolling, hasTouches]
     );
 
@@ -303,15 +370,7 @@ export const InfiniteScroller: React.FC<Props> = p => {
         else didFirstScroll.current = true;
     }, [onScroll, paddingBottom, paddingRight]);
 
-    const setRefs = React.useCallback(
-        (instance: HTMLDivElement | null) => {
-            scroller.current = instance;
-            if (scrollRef !== undefined) {
-                scrollRef.current = instance;
-            }
-        },
-        [scrollRef]
-    );
+    const setRefs = React.useMemo(() => makeSetRefs(scroller, scrollRef), [scrollRef]);
 
     let key = 0;
     let h = 0;

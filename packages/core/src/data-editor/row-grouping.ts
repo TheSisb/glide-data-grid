@@ -2,7 +2,6 @@ import React from "react";
 import type { Theme } from "../common/styles.js";
 import type { DataEditorProps } from "./data-editor.js";
 import type { DataGridProps } from "../internal/data-grid/data-grid.js";
-import { whenDefined } from "../common/utils.js";
 
 type Mutable<T> = {
     -readonly [K in keyof T]: T[K];
@@ -244,6 +243,52 @@ export interface UseRowGroupingInnerResult {
     readonly getRowThemeOverride: DataGridProps["getRowThemeOverride"];
 }
 
+// The functions below are module level so that what they return holds its arguments and nothing from a render.
+function makeGroupedRowHeight(
+    flattenedRowGroupsMap: { [rowIndex: number]: FlattenedRowGroup | undefined } | undefined,
+    groupHeight: number,
+    rowHeightIn: NonNullable<DataEditorProps["rowHeight"]>
+): (rowIndex: number) => number {
+    return rowIndex => {
+        if (flattenedRowGroupsMap?.[rowIndex]) return groupHeight;
+        return typeof rowHeightIn === "number" ? rowHeightIn : rowHeightIn(rowIndex);
+    };
+}
+
+function makeRowNumberMapper(
+    flattenedRowGroups: readonly FlattenedRowGroup[] | undefined
+): (row: number) => number | undefined {
+    return row => {
+        if (flattenedRowGroups === undefined) return row;
+        let toGo = row;
+
+        for (const group of flattenedRowGroups) {
+            if (toGo === 0) return undefined;
+            toGo--;
+            if (!group.isCollapsed) {
+                if (toGo < group.rows) return group.contentIndex + toGo;
+                toGo -= group.rows;
+            }
+        }
+
+        return row;
+    };
+}
+
+function makeGetRowThemeOverride(
+    flattenedRowGroups: readonly FlattenedRowGroup[] | undefined,
+    getRowThemeOverrideIn: DataEditorProps["getRowThemeOverride"],
+    options: RowGroupingOptions | undefined
+): (row: number) => Partial<Theme> | undefined {
+    return row => {
+        if (options === undefined) return getRowThemeOverrideIn?.(row, row, row);
+        if (getRowThemeOverrideIn === undefined && options?.themeOverride === undefined) return undefined;
+        const { isGroupHeader, contentIndex, groupIndex } = mapRowIndexToPath(row, flattenedRowGroups);
+        if (isGroupHeader) return options.themeOverride;
+        return getRowThemeOverrideIn?.(row, groupIndex, contentIndex);
+    };
+}
+
 export function useRowGroupingInner(
     options: RowGroupingOptions | undefined,
     rows: number,
@@ -270,43 +315,17 @@ export function useRowGroupingInner(
     const rowHeight = React.useMemo(() => {
         if (options === undefined) return rowHeightIn;
         if (typeof rowHeightIn === "number" && options.height === rowHeightIn) return rowHeightIn;
-        return (rowIndex: number) => {
-            if (flattenedRowGroupsMap?.[rowIndex]) return options.height;
-            return typeof rowHeightIn === "number" ? rowHeightIn : rowHeightIn(rowIndex);
-        };
+        return makeGroupedRowHeight(flattenedRowGroupsMap, options.height, rowHeightIn);
     }, [flattenedRowGroupsMap, options, rowHeightIn]);
 
-    const rowNumberMapperOut = React.useCallback(
-        (row: number): number | undefined => {
-            if (flattenedRowGroups === undefined) return row;
-            let toGo = row;
+    const rowNumberMapperOut = React.useMemo(() => makeRowNumberMapper(flattenedRowGroups), [flattenedRowGroups]);
 
-            for (const group of flattenedRowGroups) {
-                if (toGo === 0) return undefined;
-                toGo--;
-                if (!group.isCollapsed) {
-                    if (toGo < group.rows) return group.contentIndex + toGo;
-                    toGo -= group.rows;
-                }
-            }
-
-            return row;
-        },
-        [flattenedRowGroups]
-    );
-
-    const getRowThemeOverride = whenDefined(
-        getRowThemeOverrideIn ?? options?.themeOverride,
-        React.useCallback(
-            (row: number): Partial<Theme> | undefined => {
-                if (options === undefined) return getRowThemeOverrideIn?.(row, row, row);
-                if (getRowThemeOverrideIn === undefined && options?.themeOverride === undefined) return undefined;
-                const { isGroupHeader, contentIndex, groupIndex } = mapRowIndexToPath(row, flattenedRowGroups);
-                if (isGroupHeader) return options.themeOverride;
-                return getRowThemeOverrideIn?.(row, groupIndex, contentIndex);
-            },
-            [flattenedRowGroups, getRowThemeOverrideIn, options]
-        )
+    const getRowThemeOverride = React.useMemo(
+        () =>
+            (getRowThemeOverrideIn ?? options?.themeOverride) === undefined
+                ? undefined
+                : makeGetRowThemeOverride(flattenedRowGroups, getRowThemeOverrideIn, options),
+        [flattenedRowGroups, getRowThemeOverrideIn, options]
     );
 
     if (options === undefined)

@@ -1,5 +1,5 @@
-import React from "react";
 import { CompactSelection, type GridSelection, type Slice } from "./data-grid-types.js";
+import { useStableCallback } from "../../common/use-stable-callback.js";
 
 type SetCallback = (newVal: GridSelection, expand: boolean) => void;
 
@@ -23,7 +23,7 @@ export function useSelectionBehavior(
     rangeSelectionColumnSpanning: boolean
 ) {
     // if append is true, the current range will be added to the rangeStack
-    const setCurrent = React.useCallback(
+    const setCurrent = useStableCallback(
         (
             value: Pick<NonNullable<GridSelection["current"]>, "cell" | "range"> | undefined,
             expand: boolean,
@@ -80,19 +80,10 @@ export function useSelectionBehavior(
                 };
             }
             setGridSelection(newVal, expand);
-        },
-        [
-            columnBehavior,
-            gridSelection,
-            rangeBehavior,
-            rangeSelect,
-            rangeSelectionColumnSpanning,
-            rowBehavior,
-            setGridSelection,
-        ]
+        }
     );
 
-    const setSelectedRows = React.useCallback(
+    const setSelectedRows = useStableCallback(
         (newRows: CompactSelection | undefined, append: Slice | number | undefined, allowMixed: boolean): void => {
             newRows = newRows ?? gridSelection.rows;
             if (append !== undefined) {
@@ -116,11 +107,10 @@ export function useSelectionBehavior(
                 };
             }
             setGridSelection(newVal, false);
-        },
-        [columnBehavior, gridSelection, rangeBehavior, rowBehavior, setGridSelection]
+        }
     );
 
-    const setSelectedColumns = React.useCallback(
+    const setSelectedColumns = useStableCallback(
         (newCols: CompactSelection | undefined, append: number | Slice | undefined, allowMixed: boolean): void => {
             newCols = newCols ?? gridSelection.columns;
             if (append !== undefined) {
@@ -144,8 +134,7 @@ export function useSelectionBehavior(
                 };
             }
             setGridSelection(newVal, false);
-        },
-        [columnBehavior, gridSelection, rangeBehavior, rowBehavior, setGridSelection]
+        }
     );
 
     return [setCurrent, setSelectedRows, setSelectedColumns] as const;
