@@ -1,21 +1,26 @@
 import React from "react";
-import { flattenRowGroups, mapRowIndexToPath } from "./row-grouping.js";
+import { flattenRowGroups, mapRowIndexToPath, } from "./row-grouping.js";
 export function useRowGrouping(options, rows) {
     const flattenedRowGroups = React.useMemo(() => (options === undefined ? undefined : flattenRowGroups(options, rows)), [options, rows]);
+    const mapper = React.useMemo(() => makeMapper(flattenedRowGroups), [flattenedRowGroups]);
     return {
         getRowGroupingForPath,
         updateRowGroupingByPath,
-        mapper: React.useCallback((itemOrRow) => {
-            if (typeof itemOrRow === "number") {
-                return mapRowIndexToPath(itemOrRow, flattenedRowGroups);
-            }
-            const r = mapRowIndexToPath(itemOrRow[1], flattenedRowGroups);
-            return {
-                ...r,
-                originalIndex: [itemOrRow[0], r.originalIndex],
-            }; // FIXME
-        }, [flattenedRowGroups]),
+        mapper,
     };
+}
+// Module level so that the mapper holds its argument and nothing from a render.
+function makeMapper(flattenedRowGroups) {
+    return ((itemOrRow) => {
+        if (typeof itemOrRow === "number") {
+            return mapRowIndexToPath(itemOrRow, flattenedRowGroups);
+        }
+        const r = mapRowIndexToPath(itemOrRow[1], flattenedRowGroups);
+        return {
+            ...r,
+            originalIndex: [itemOrRow[0], r.originalIndex],
+        };
+    }); // FIXME
 }
 export function updateRowGroupingByPath(rowGrouping, path, update) {
     const [index, ...rest] = path;

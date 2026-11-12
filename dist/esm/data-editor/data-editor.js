@@ -11,6 +11,7 @@ import DataGridSearch, {} from "../internal/data-grid-search/data-grid-search.js
 import { browserIsOSX } from "../common/browser-detect.js";
 import { getDataEditorTheme, makeCSSStyle, ThemeContext, mergeAndRealizeTheme, } from "../common/styles.js";
 import { getScrollBarWidth, useEventListener, whenDefined } from "../common/utils.js";
+import { useLatest, useStableCallback } from "../common/use-stable-callback.js";
 import { isGroupEqual, itemsAreEqual, itemIsInRect, gridSelectionHasItem, getFreezeTrailingHeight, } from "../internal/data-grid/render/data-grid-lib.js";
 import { GroupRename } from "./group-rename.js";
 import { measureColumn, useColumnSizer } from "./use-column-sizer.js";
@@ -68,6 +69,244 @@ export const emptyGridSelection = {
     rows: CompactSelection.empty(),
     current: undefined,
 };
+// The functions below are module level so that what they return holds its arguments and nothing from a render of
+// DataEditor. A function created in the render body keeps that whole render alive for as long as it is referenced.
+function abortOnCleanup(abortControllerRef) {
+    return () => abortControllerRef.current.abort();
+}
+function offsetValidateCell(validateCellIn, rowMarkerOffset) {
+    return (cell, newValue, prevValue) => {
+        if (validateCellIn === undefined)
+            return true;
+        const item = [cell[0] - rowMarkerOffset, cell[1]];
+        return validateCellIn?.(item, newValue, prevValue);
+    };
+}
+function offsetDrawHeader(drawHeaderIn, rowMarkerOffset) {
+    return (args, draw) => {
+        return drawHeaderIn({ ...args, columnIndex: args.columnIndex - rowMarkerOffset }, draw) ?? false;
+    };
+}
+function offsetDrawCell(drawCellIn, rowMarkerOffset) {
+    return (args, draw) => {
+        return drawCellIn({ ...args, col: args.col - rowMarkerOffset }, draw) ?? false;
+    };
+}
+function offsetColumnProposeMove(onColumnProposeMove, rowMarkerOffset) {
+    return (startIndex, endIndex) => {
+        return onColumnProposeMove(startIndex - rowMarkerOffset, endIndex - rowMarkerOffset) !== false;
+    };
+}
+function offsetVerticalBorder(verticalBorder, rowMarkerOffset) {
+    return col => {
+        return typeof verticalBorder === "boolean" ? verticalBorder : (verticalBorder?.(col - rowMarkerOffset) ?? true);
+    };
+}
+function makeGetCellRenderer(rendererMap, additionalRenderers) {
+    return (cell) => {
+        if (cell.kind !== GridCellKind.Custom) {
+            return rendererMap[cell.kind];
+        }
+        return additionalRenderers?.find(x => x.isMatch(cell));
+    };
+}
+function makeGetMangledCellContent(inputs) {
+    const { showTrailingBlankRow, mangledRows, rowNumberMapper, rowMarkerCheckboxStyle, selectedRows, rowMarkers, rowMarkerStartIndex, onRowMoved, rowMarkerOffset, trailingRowHint, trailingRowAddIcon, strict, getCellContent, mangledColsRef, visibleRegionRef, rowsRef, } = inputs;
+    const hasRowMarkers = rowMarkers !== "none";
+    return ([col, row], forceStrict = false) => {
+        const isTrailing = showTrailingBlankRow && row === mangledRows - 1;
+        const isRowMarkerCol = col === 0 && hasRowMarkers;
+        if (isRowMarkerCol) {
+            if (isTrailing) {
+                return loadingCell;
+            }
+            const mappedRow = rowNumberMapper(row);
+            if (mappedRow === undefined)
+                return loadingCell;
+            return {
+                kind: InnerGridCellKind.Marker,
+                allowOverlay: false,
+                checkboxStyle: rowMarkerCheckboxStyle,
+                checked: selectedRows.hasIndex(row),
+                markerKind: rowMarkers === "clickable-number" ? "number" : rowMarkers,
+                row: rowMarkerStartIndex + mappedRow,
+                drawHandle: onRowMoved !== undefined,
+                cursor: rowMarkers === "clickable-number" ? "pointer" : undefined,
+            };
+        }
+        else if (isTrailing) {
+            //If the grid is empty, we will return text
+            const isFirst = col === rowMarkerOffset;
+            const maybeFirstColumnHint = isFirst ? (trailingRowHint ?? "") : "";
+            const c = mangledColsRef.current[col];
+            if (c?.trailingRowOptions?.disabled === true) {
+                return loadingCell;
+            }
+            else {
+                const hint = c?.trailingRowOptions?.hint ?? maybeFirstColumnHint;
+                const icon = c?.trailingRowOptions?.addIcon ?? trailingRowAddIcon;
+                return {
+                    kind: InnerGridCellKind.NewRow,
+                    hint,
+                    allowOverlay: false,
+                    icon,
+                };
+            }
+        }
+        else {
+            const outerCol = col - rowMarkerOffset;
+            if (forceStrict || strict === true) {
+                const vr = visibleRegionRef.current;
+                const isOutsideMainArea = vr.x > outerCol ||
+                    outerCol > vr.x + vr.width ||
+                    vr.y > row ||
+                    row > vr.y + vr.height ||
+                    row >= rowsRef.current;
+                const isSelected = outerCol === vr.extras?.selected?.[0] && row === vr.extras?.selected[1];
+                let isInFreezeArea = false;
+                if (vr.extras?.freezeRegions !== undefined) {
+                    for (const fr of vr.extras.freezeRegions) {
+                        if (pointInRect(fr, outerCol, row)) {
+                            isInFreezeArea = true;
+                            break;
+                        }
+                    }
+                }
+                if (isOutsideMainArea && !isSelected && !isInFreezeArea) {
+                    return loadingCell;
+                }
+            }
+            let result = getCellContent([outerCol, row]);
+            if (rowMarkerOffset !== 0 && result.span !== undefined) {
+                result = {
+                    ...result,
+                    span: [result.span[0] + rowMarkerOffset, result.span[1] + rowMarkerOffset],
+                };
+            }
+            return result;
+        }
+    };
+}
+function makeGetGroupDetails(getGroupDetails, onGroupHeaderRenamed, setRenameGroup) {
+    return group => {
+        let result = getGroupDetails?.(group) ?? { name: group };
+        if (onGroupHeaderRenamed !== undefined && group !== "") {
+            result = {
+                icon: result.icon,
+                name: result.name,
+                overrideTheme: result.overrideTheme,
+                actions: [
+                    ...(result.actions ?? []),
+                    {
+                        title: "Rename",
+                        icon: "renameIcon",
+                        onClick: e => setRenameGroup({
+                            group: result.name,
+                            bounds: e.bounds,
+                        }),
+                    },
+                ],
+            };
+        }
+        return result;
+    };
+}
+function makeOnVisibleRegionChanged(inputs) {
+    const { currentCell, rowMarkerOffset, showTrailingBlankRow, rows, freezeColumns, freezeTrailingRows, setVisibleRegion, setClientSize, onVisibleRegionChanged, hasJustScrolled, visibleRegionRef, regionCommitPendingRef, } = inputs;
+    return (region, clientWidth, clientHeight, rightElWidth, tx, ty) => {
+        hasJustScrolled.current = false;
+        let selected = currentCell;
+        if (selected !== undefined) {
+            selected = [selected[0] - rowMarkerOffset, selected[1]];
+        }
+        const freezeRegion = freezeColumns === 0
+            ? undefined
+            : {
+                x: 0,
+                y: region.y,
+                width: freezeColumns,
+                height: region.height,
+            };
+        const freezeRegions = [];
+        if (freezeRegion !== undefined)
+            freezeRegions.push(freezeRegion);
+        if (freezeTrailingRows > 0) {
+            freezeRegions.push({
+                x: region.x - rowMarkerOffset,
+                y: rows - freezeTrailingRows,
+                width: region.width,
+                height: freezeTrailingRows,
+            });
+            if (freezeColumns > 0) {
+                freezeRegions.push({
+                    x: 0,
+                    y: rows - freezeTrailingRows,
+                    width: freezeColumns,
+                    height: freezeTrailingRows,
+                });
+            }
+        }
+        const newRegion = {
+            x: region.x - rowMarkerOffset,
+            y: region.y,
+            width: region.width,
+            height: showTrailingBlankRow && region.y + region.height >= rows ? region.height - 1 : region.height,
+            tx,
+            ty,
+            extras: {
+                selected,
+                freezeRegion,
+                freezeRegions,
+            },
+        };
+        visibleRegionRef.current = newRegion;
+        regionCommitPendingRef.current = true;
+        setVisibleRegion(newRegion);
+        setClientSize([clientWidth, clientHeight, rightElWidth]);
+        onVisibleRegionChanged?.(newRegion, newRegion.tx, newRegion.ty, newRegion.extras);
+    };
+}
+function makeAdjustSelectionOnScroll(hoveredRef, visibleRegionRef, columnCount, rows, onItemHoveredImpl) {
+    return () => {
+        const args = hoveredRef.current;
+        if (args === undefined)
+            return;
+        const [xDir, yDir] = args.scrollEdge;
+        let [col, row] = args.location;
+        const visible = visibleRegionRef.current;
+        if (xDir === -1) {
+            col = visible.extras?.freezeRegion?.x ?? visible.x;
+        }
+        else if (xDir === 1) {
+            col = visible.x + visible.width;
+        }
+        if (yDir === -1) {
+            row = Math.max(0, visible.y);
+        }
+        else if (yDir === 1) {
+            row = Math.min(rows - 1, visible.y + visible.height);
+        }
+        col = clamp(col, 0, columnCount - 1);
+        row = clamp(row, 0, rows - 1);
+        onItemHoveredImpl({
+            ...args,
+            location: [col, row],
+        });
+    };
+}
+function forwardDataEditorRef(latest) {
+    return {
+        appendRow: (col, openOverlay, behavior) => latest.current.appendRow(col, openOverlay, behavior),
+        appendColumn: (row, openOverlay) => latest.current.appendColumn(row, openOverlay),
+        updateCells: damageList => latest.current.updateCells(damageList),
+        getBounds: (col, row) => latest.current.getBounds(col, row),
+        focus: () => latest.current.focus(),
+        emit: eventName => latest.current.emit(eventName),
+        scrollTo: (col, row, dir, paddingX, paddingY, options) => latest.current.scrollTo(col, row, dir, paddingX, paddingY, options),
+        remeasureColumns: cols => latest.current.remeasureColumns(cols),
+        getMouseArgsForPosition: (posX, posY, ev) => latest.current.getMouseArgsForPosition(posX, posY, ev),
+    };
+}
 const DataEditorImpl = (p, forwardedRef) => {
     const [gridSelectionInner, setGridSelectionInner] = React.useState(emptyGridSelection);
     const [overlay, setOverlay] = React.useState();
@@ -115,14 +354,14 @@ const DataEditorImpl = (p, forwardedRef) => {
     const lastRowSticky = trailingRowOptions?.sticky === true;
     const [showSearchInner, setShowSearchInner] = React.useState(false);
     const showSearch = showSearchIn ?? showSearchInner;
-    const onSearchClose = React.useCallback(() => {
+    const onSearchClose = useStableCallback(() => {
         if (onSearchCloseIn !== undefined) {
             onSearchCloseIn();
         }
         else {
             setShowSearchInner(false);
         }
-    }, [onSearchCloseIn]);
+    });
     const gridSelectionOuterMangled = React.useMemo(() => {
         return gridSelectionOuter === undefined ? undefined : shiftSelection(gridSelectionOuter, rowMarkerOffset);
     }, [gridSelectionOuter, rowMarkerOffset]);
@@ -130,17 +369,12 @@ const DataEditorImpl = (p, forwardedRef) => {
     const abortControllerRef = React.useRef();
     if (abortControllerRef.current === undefined)
         abortControllerRef.current = new AbortController();
-    React.useEffect(() => () => abortControllerRef?.current.abort(), []);
+    React.useEffect(() => abortOnCleanup(abortControllerRef), []);
     const [getCellsForSelection, getCellsForSeletionDirect] = useCellsForSelection(getCellsForSelectionIn, getCellContent, rowMarkerOffset, abortControllerRef.current, rows);
-    const validateCell = React.useCallback((cell, newValue, prevValue) => {
-        if (validateCellIn === undefined)
-            return true;
-        const item = [cell[0] - rowMarkerOffset, cell[1]];
-        return validateCellIn?.(item, newValue, prevValue);
-    }, [rowMarkerOffset, validateCellIn]);
+    const validateCell = React.useMemo(() => offsetValidateCell(validateCellIn, rowMarkerOffset), [rowMarkerOffset, validateCellIn]);
     // Starts empty so that a selection present at mount is scrolled into view like any later external selection.
     const expectedExternalGridSelection = React.useRef(undefined);
-    const setGridSelection = React.useCallback((newVal, expand) => {
+    const setGridSelection = useStableCallback((newVal, expand) => {
         if (expand) {
             newVal = expandSelection(newVal, getCellsForSelection, rowMarkerOffset, spanRangeBehavior, abortControllerRef.current);
         }
@@ -151,23 +385,19 @@ const DataEditorImpl = (p, forwardedRef) => {
         else {
             setGridSelectionInner(newVal);
         }
-    }, [onGridSelectionChange, getCellsForSelection, rowMarkerOffset, spanRangeBehavior]);
-    const onColumnResize = whenDefined(onColumnResizeIn, React.useCallback((_, w, ind, wg) => {
+    });
+    const onColumnResize = whenDefined(onColumnResizeIn, useStableCallback((_, w, ind, wg) => {
         onColumnResizeIn?.(columnsIn[ind - rowMarkerOffset], w, ind - rowMarkerOffset, wg);
-    }, [onColumnResizeIn, rowMarkerOffset, columnsIn]));
-    const onColumnResizeEnd = whenDefined(onColumnResizeEndIn, React.useCallback((_, w, ind, wg) => {
+    }));
+    const onColumnResizeEnd = whenDefined(onColumnResizeEndIn, useStableCallback((_, w, ind, wg) => {
         onColumnResizeEndIn?.(columnsIn[ind - rowMarkerOffset], w, ind - rowMarkerOffset, wg);
-    }, [onColumnResizeEndIn, rowMarkerOffset, columnsIn]));
-    const onColumnResizeStart = whenDefined(onColumnResizeStartIn, React.useCallback((_, w, ind, wg) => {
+    }));
+    const onColumnResizeStart = whenDefined(onColumnResizeStartIn, useStableCallback((_, w, ind, wg) => {
         onColumnResizeStartIn?.(columnsIn[ind - rowMarkerOffset], w, ind - rowMarkerOffset, wg);
-    }, [onColumnResizeStartIn, rowMarkerOffset, columnsIn]));
-    const drawHeader = whenDefined(drawHeaderIn, React.useCallback((args, draw) => {
-        return drawHeaderIn?.({ ...args, columnIndex: args.columnIndex - rowMarkerOffset }, draw) ?? false;
-    }, [drawHeaderIn, rowMarkerOffset]));
-    const drawCell = whenDefined(drawCellIn, React.useCallback((args, draw) => {
-        return drawCellIn?.({ ...args, col: args.col - rowMarkerOffset }, draw) ?? false;
-    }, [drawCellIn, rowMarkerOffset]));
-    const onDelete = React.useCallback(sel => {
+    }));
+    const drawHeader = React.useMemo(() => (drawHeaderIn === undefined ? undefined : offsetDrawHeader(drawHeaderIn, rowMarkerOffset)), [drawHeaderIn, rowMarkerOffset]);
+    const drawCell = React.useMemo(() => (drawCellIn === undefined ? undefined : offsetDrawCell(drawCellIn, rowMarkerOffset)), [drawCellIn, rowMarkerOffset]);
+    const onDelete = sel => {
         if (onDeleteIn !== undefined) {
             const result = onDeleteIn(shiftSelection(sel, -rowMarkerOffset));
             if (typeof result === "boolean") {
@@ -176,7 +406,7 @@ const DataEditorImpl = (p, forwardedRef) => {
             return shiftSelection(result, rowMarkerOffset);
         }
         return true;
-    }, [onDeleteIn, rowMarkerOffset]);
+    };
     const [setCurrent, setSelectedRows, setSelectedColumns] = useSelectionBehavior(gridSelection, setGridSelection, rangeSelectionBlending, columnSelectionBlending, rowSelectionBlending, rangeSelect, rangeSelectionColumnSpanning);
     const mergedTheme = React.useMemo(() => {
         return mergeAndRealizeTheme(getDataEditorTheme(), theme);
@@ -191,12 +421,7 @@ const DataEditorImpl = (p, forwardedRef) => {
         }
         return result;
     }, [renderers]);
-    const getCellRenderer = React.useCallback((cell) => {
-        if (cell.kind !== GridCellKind.Custom) {
-            return rendererMap[cell.kind];
-        }
-        return additionalRenderers?.find(x => x.isMatch(cell));
-    }, [additionalRenderers, rendererMap]);
+    const getCellRenderer = React.useMemo(() => makeGetCellRenderer(rendererMap, additionalRenderers), [additionalRenderers, rendererMap]);
     // eslint-disable-next-line prefer-const
     let { sizedColumns: columns, nonGrowWidth } = useColumnSizer(columnsIn, rows, getCellsForSeletionDirect, clientSize[0] - (rowMarkerOffset === 0 ? 0 : rowMarkerWidth) - clientSize[2], minColumnWidth, maxColumnAutoWidth, mergedTheme, getCellRenderer, abortControllerRef.current);
     if (rowMarkers !== "none")
@@ -249,7 +474,7 @@ const DataEditorImpl = (p, forwardedRef) => {
     const cellXOffset = visibleRegion.x + rowMarkerOffset;
     const cellYOffset = visibleRegion.y;
     const gridRef = React.useRef(null);
-    const focus = React.useCallback((immediate) => {
+    const focus = useStableCallback((immediate) => {
         if (immediate === true) {
             gridRef.current?.focus();
         }
@@ -258,9 +483,9 @@ const DataEditorImpl = (p, forwardedRef) => {
                 gridRef.current?.focus();
             });
         }
-    }, []);
+    });
     const mangledRows = showTrailingBlankRow ? rows + 1 : rows;
-    const mangledOnCellsEdited = React.useCallback((items) => {
+    const mangledOnCellsEdited = (items) => {
         const mangledItems = rowMarkerOffset === 0
             ? items
             : items.map(x => ({
@@ -273,7 +498,7 @@ const DataEditorImpl = (p, forwardedRef) => {
                 onCellEdited?.(i.location, i.value);
         }
         return r;
-    }, [onCellEdited, onCellsEdited, rowMarkerOffset]);
+    };
     React.useEffect(() => {
         if (onCellEdited === undefined && onCellsEdited === undefined)
             return;
@@ -348,117 +573,47 @@ const DataEditorImpl = (p, forwardedRef) => {
     ]);
     const mangledColsRef = React.useRef(mangledCols);
     mangledColsRef.current = mangledCols;
-    const getMangledCellContent = React.useCallback(([col, row], forceStrict = false) => {
-        const isTrailing = showTrailingBlankRow && row === mangledRows - 1;
-        const isRowMarkerCol = col === 0 && hasRowMarkers;
-        if (isRowMarkerCol) {
-            if (isTrailing) {
-                return loadingCell;
-            }
-            const mappedRow = rowNumberMapper(row);
-            if (mappedRow === undefined)
-                return loadingCell;
-            return {
-                kind: InnerGridCellKind.Marker,
-                allowOverlay: false,
-                checkboxStyle: rowMarkerCheckboxStyle,
-                checked: gridSelection?.rows.hasIndex(row) === true,
-                markerKind: rowMarkers === "clickable-number" ? "number" : rowMarkers,
-                row: rowMarkerStartIndex + mappedRow,
-                drawHandle: onRowMoved !== undefined,
-                cursor: rowMarkers === "clickable-number" ? "pointer" : undefined,
-            };
-        }
-        else if (isTrailing) {
-            //If the grid is empty, we will return text
-            const isFirst = col === rowMarkerOffset;
-            const maybeFirstColumnHint = isFirst ? (trailingRowOptions?.hint ?? "") : "";
-            const c = mangledColsRef.current[col];
-            if (c?.trailingRowOptions?.disabled === true) {
-                return loadingCell;
-            }
-            else {
-                const hint = c?.trailingRowOptions?.hint ?? maybeFirstColumnHint;
-                const icon = c?.trailingRowOptions?.addIcon ?? trailingRowOptions?.addIcon;
-                return {
-                    kind: InnerGridCellKind.NewRow,
-                    hint,
-                    allowOverlay: false,
-                    icon,
-                };
-            }
-        }
-        else {
-            const outerCol = col - rowMarkerOffset;
-            if (forceStrict || experimental?.strict === true) {
-                const vr = visibleRegionRef.current;
-                const isOutsideMainArea = vr.x > outerCol ||
-                    outerCol > vr.x + vr.width ||
-                    vr.y > row ||
-                    row > vr.y + vr.height ||
-                    row >= rowsRef.current;
-                const isSelected = outerCol === vr.extras?.selected?.[0] && row === vr.extras?.selected[1];
-                let isInFreezeArea = false;
-                if (vr.extras?.freezeRegions !== undefined) {
-                    for (const fr of vr.extras.freezeRegions) {
-                        if (pointInRect(fr, outerCol, row)) {
-                            isInFreezeArea = true;
-                            break;
-                        }
-                    }
-                }
-                if (isOutsideMainArea && !isSelected && !isInFreezeArea) {
-                    return loadingCell;
-                }
-            }
-            let result = getCellContent([outerCol, row]);
-            if (rowMarkerOffset !== 0 && result.span !== undefined) {
-                result = {
-                    ...result,
-                    span: [result.span[0] + rowMarkerOffset, result.span[1] + rowMarkerOffset],
-                };
-            }
-            return result;
-        }
-    }, [
+    const rowsRef = React.useRef(rows);
+    rowsRef.current = rows;
+    const rowSelection = gridSelection.rows;
+    const trailingRowHint = trailingRowOptions?.hint;
+    const trailingRowAddIcon = trailingRowOptions?.addIcon;
+    const strict = experimental?.strict;
+    const getMangledCellContent = React.useMemo(() => makeGetMangledCellContent({
         showTrailingBlankRow,
         mangledRows,
-        hasRowMarkers,
         rowNumberMapper,
         rowMarkerCheckboxStyle,
-        gridSelection?.rows,
+        selectedRows: rowSelection,
         rowMarkers,
         rowMarkerStartIndex,
         onRowMoved,
         rowMarkerOffset,
-        trailingRowOptions?.hint,
-        trailingRowOptions?.addIcon,
-        experimental?.strict,
+        trailingRowHint,
+        trailingRowAddIcon,
+        strict,
+        getCellContent,
+        mangledColsRef,
+        visibleRegionRef,
+        rowsRef,
+    }), [
+        showTrailingBlankRow,
+        mangledRows,
+        rowNumberMapper,
+        rowMarkerCheckboxStyle,
+        rowSelection,
+        rowMarkers,
+        rowMarkerStartIndex,
+        onRowMoved,
+        rowMarkerOffset,
+        trailingRowHint,
+        trailingRowAddIcon,
+        strict,
         getCellContent,
     ]);
-    const mangledGetGroupDetails = React.useCallback(group => {
-        let result = getGroupDetails?.(group) ?? { name: group };
-        if (onGroupHeaderRenamed !== undefined && group !== "") {
-            result = {
-                icon: result.icon,
-                name: result.name,
-                overrideTheme: result.overrideTheme,
-                actions: [
-                    ...(result.actions ?? []),
-                    {
-                        title: "Rename",
-                        icon: "renameIcon",
-                        onClick: e => setRenameGroup({
-                            group: result.name,
-                            bounds: e.bounds,
-                        }),
-                    },
-                ],
-            };
-        }
-        return result;
-    }, [getGroupDetails, onGroupHeaderRenamed]);
-    const setOverlaySimple = React.useCallback((val) => {
+    const [renameGroup, setRenameGroup] = React.useState();
+    const mangledGetGroupDetails = React.useMemo(() => makeGetGroupDetails(getGroupDetails, onGroupHeaderRenamed, setRenameGroup), [getGroupDetails, onGroupHeaderRenamed]);
+    const setOverlaySimple = (val) => {
         const [col, row] = val.cell;
         const column = mangledCols[col];
         const groupTheme = column?.group !== undefined ? mangledGetGroupDetails(column.group)?.overrideTheme : undefined;
@@ -468,8 +623,8 @@ const DataEditorImpl = (p, forwardedRef) => {
             ...val,
             theme: mergeAndRealizeTheme(mergedTheme, groupTheme, colTheme, rowTheme, val.content.themeOverride),
         });
-    }, [getRowThemeOverride, mangledCols, mangledGetGroupDetails, mergedTheme]);
-    const reselect = React.useCallback((bounds, activation, initialValue) => {
+    };
+    const reselect = (bounds, activation, initialValue) => {
         if (gridSelection.current === undefined)
             return;
         const [col, row] = gridSelection.current.cell;
@@ -518,8 +673,8 @@ const DataEditorImpl = (p, forwardedRef) => {
             ]);
             gridRef.current?.damage([{ cell: gridSelection.current.cell }]);
         }
-    }, [getMangledCellContent, gridSelection, mangledOnCellsEdited, setOverlaySimple]);
-    const focusOnRowFromTrailingBlankRow = React.useCallback((col, row) => {
+    };
+    const focusOnRowFromTrailingBlankRow = (col, row) => {
         const bounds = gridRef.current?.getBounds(col, row);
         if (bounds === undefined || scrollRef.current === null) {
             return;
@@ -537,14 +692,14 @@ const DataEditorImpl = (p, forwardedRef) => {
             forceEditMode: true,
             activation: { inputType: "keyboard", key: "Enter" },
         });
-    }, [getMangledCellContent, scrollRef, setOverlaySimple]);
+    };
     // scrollTo measures its target from what the grid has drawn and applies the result to the live scroller position,
     // so the two must agree. When they do not (before the first draw, or while a scroll has not been drawn yet), the
     // request waits here and runs once they do. A newer request replaces a waiting one.
     const pendingScrollToRef = React.useRef(undefined);
     const processedScrollRef = React.useRef(undefined);
     const regionCommitPendingRef = React.useRef(false);
-    const scrollTo = React.useCallback((col, row, dir = "both", paddingX = 0, paddingY = 0, options = undefined) => {
+    const scrollTo = useStableCallback((col, row, dir = "both", paddingX = 0, paddingY = 0, options = undefined) => {
         const scroller = scrollRef.current;
         const processed = processedScrollRef.current;
         const isDrawn = scroller !== null &&
@@ -674,27 +829,14 @@ const DataEditorImpl = (p, forwardedRef) => {
                 }
             }
         }
-    }, [
-        rowMarkerOffset,
-        freezeTrailingRows,
-        rowMarkerWidth,
-        scrollRef,
-        totalHeaderHeight,
-        freezeColumns,
-        columns,
-        mangledRows,
-        lastRowSticky,
-        rowHeight,
-    ]);
+    });
     const focusCallback = React.useRef(focusOnRowFromTrailingBlankRow);
     const getCellContentRef = React.useRef(getCellContent);
     focusCallback.current = focusOnRowFromTrailingBlankRow;
     getCellContentRef.current = getCellContent;
-    const rowsRef = React.useRef(rows);
-    rowsRef.current = rows;
     const colsRef = React.useRef(mangledCols.length);
     colsRef.current = mangledCols.length;
-    const appendRow = React.useCallback(async (col, openOverlay = true, behavior) => {
+    const appendRow = async (col, openOverlay = true, behavior) => {
         const c = mangledCols[col];
         if (c?.trailingRowOptions?.disabled === true) {
             return;
@@ -739,8 +881,8 @@ const DataEditorImpl = (p, forwardedRef) => {
         };
         // Queue up to allow the consumer to react to the event and let us check if they did
         doFocus();
-    }, [mangledCols, onRowAppended, rowMarkerOffset, rows, setCurrent]);
-    const appendColumn = React.useCallback(async (row, openOverlay = true) => {
+    };
+    const appendColumn = async (row, openOverlay = true) => {
         const appendResult = onColumnAppended?.();
         let r = undefined;
         let right = true;
@@ -779,8 +921,8 @@ const DataEditorImpl = (p, forwardedRef) => {
             }
         };
         doFocus();
-    }, [mangledCols, onColumnAppended, rowMarkerOffset, scrollTo, setCurrent]);
-    const getCustomNewRowTargetColumn = React.useCallback((col) => {
+    };
+    const getCustomNewRowTargetColumn = (col) => {
         const customTargetColumn = columns[col]?.trailingRowOptions?.targetColumn ?? trailingRowOptions?.targetColumn;
         if (typeof customTargetColumn === "number") {
             const customTargetOffset = hasRowMarkers ? 1 : 0;
@@ -794,16 +936,16 @@ const DataEditorImpl = (p, forwardedRef) => {
             }
         }
         return undefined;
-    }, [columns, columnsIn, hasRowMarkers, trailingRowOptions?.targetColumn]);
+    };
     const lastSelectedRowRef = React.useRef();
     const lastSelectedColRef = React.useRef();
-    const themeForCell = React.useCallback((cell, pos) => {
+    const themeForCell = (cell, pos) => {
         const [col, row] = pos;
         return mergeAndRealizeTheme(mergedTheme, mangledCols[col]?.themeOverride, getRowThemeOverride?.(row), cell.themeOverride);
-    }, [getRowThemeOverride, mangledCols, mergedTheme]);
+    };
     const { mapper } = useRowGrouping(rowGrouping, rowsIn);
     const rowGroupingNavBehavior = rowGrouping?.navigationBehavior;
-    const handleSelect = React.useCallback((args) => {
+    const handleSelect = (args) => {
         const isMultiKey = browserIsOSX.value ? args.metaKey : args.ctrlKey;
         const isMultiRow = isMultiKey && rowSelect === "multi";
         const [col, row] = args.location;
@@ -815,9 +957,7 @@ const DataEditorImpl = (p, forwardedRef) => {
             lastSelectedColRef.current = undefined;
             lastMouseSelectLocation.current = [col, row];
             if (col === 0 && hasRowMarkers) {
-                if ((showTrailingBlankRow === true && row === rows) ||
-                    rowMarkers === "number" ||
-                    rowSelect === "none")
+                if ((showTrailingBlankRow === true && row === rows) || rowMarkers === "number" || rowSelect === "none")
                     return;
                 const markerCell = getMangledCellContent(args.location);
                 if (markerCell.kind !== InnerGridCellKind.Marker) {
@@ -1005,39 +1145,12 @@ const DataEditorImpl = (p, forwardedRef) => {
             lastSelectedRowRef.current = undefined;
             lastSelectedColRef.current = undefined;
         }
-    }, [
-        rowSelect,
-        columnSelect,
-        gridSelection,
-        hasRowMarkers,
-        rowMarkerOffset,
-        showTrailingBlankRow,
-        rows,
-        rowMarkers,
-        getMangledCellContent,
-        onRowMoved,
-        focus,
-        rowSelectionMode,
-        columnSelectionMode,
-        getCellRenderer,
-        themeForCell,
-        setSelectedRows,
-        getCustomNewRowTargetColumn,
-        appendRow,
-        rowGroupingNavBehavior,
-        mapper,
-        lastRowSticky,
-        setCurrent,
-        headerRowMarkerDisabled,
-        setSelectedColumns,
-        setGridSelection,
-        onSelectionCleared,
-    ]);
+    };
     const isActivelyDraggingHeader = React.useRef(false);
     const lastMouseSelectLocation = React.useRef();
     const touchDownArgs = React.useRef(visibleRegion);
     const mouseDownData = React.useRef();
-    const onMouseDown = React.useCallback((args) => {
+    const onMouseDown = useStableCallback((args) => {
         isPrevented.current = false;
         touchDownArgs.current = visibleRegionRef.current;
         if (args.button !== 0 && args.button !== 1) {
@@ -1067,9 +1180,8 @@ const DataEditorImpl = (p, forwardedRef) => {
         else if (!args.isTouch && args.button === 1) {
             lastMouseSelectLocation.current = args.location;
         }
-    }, [gridSelection, handleSelect]);
-    const [renameGroup, setRenameGroup] = React.useState();
-    const handleGroupHeaderSelection = React.useCallback((args) => {
+    });
+    const handleGroupHeaderSelection = (args) => {
         if (args.kind !== groupHeaderKind || columnSelect !== "multi") {
             return;
         }
@@ -1107,17 +1219,9 @@ const DataEditorImpl = (p, forwardedRef) => {
         else {
             setSelectedColumns(CompactSelection.fromSingleSelection([start, end + 1]), undefined, isMultiKey);
         }
-    }, [
-        columnSelect,
-        focus,
-        gridSelection.columns,
-        mangledCols,
-        rowMarkerOffset,
-        setSelectedColumns,
-        columnSelectionMode,
-    ]);
+    };
     const isPrevented = React.useRef(false);
-    const normalSizeColumn = React.useCallback(async (col) => {
+    const normalSizeColumn = async (col) => {
         if (getCellsForSelection !== undefined && onColumnResize !== undefined) {
             const start = visibleRegionRef.current.y;
             const end = visibleRegionRef.current.height;
@@ -1139,19 +1243,9 @@ const DataEditorImpl = (p, forwardedRef) => {
                 onColumnResize?.(inputCol, newCol.width, col, newCol.width);
             }
         }
-    }, [
-        columns,
-        getCellsForSelection,
-        maxColumnWidth,
-        mergedTheme,
-        minColumnWidth,
-        onColumnResize,
-        rowMarkerOffset,
-        rows,
-        getCellRenderer,
-    ]);
+    };
     const [scrollDir, setScrollDir] = React.useState();
-    const fillPattern = React.useCallback(async (previousSelection, currentSelection) => {
+    const fillPattern = async (previousSelection, currentSelection) => {
         const patternRange = previousSelection.current?.range;
         if (patternRange === undefined ||
             getCellsForSelection === undefined ||
@@ -1193,8 +1287,8 @@ const DataEditorImpl = (p, forwardedRef) => {
         gridRef.current?.damage(editItemList.map(c => ({
             cell: c.location,
         })));
-    }, [getCellsForSelection, mangledOnCellsEdited, onFillPattern, rowMarkerOffset]);
-    const fillRight = React.useCallback(() => {
+    };
+    const fillRight = () => {
         if (gridSelection.current === undefined || gridSelection.current.range.width <= 1)
             return;
         const firstColSelection = {
@@ -1208,8 +1302,8 @@ const DataEditorImpl = (p, forwardedRef) => {
             },
         };
         void fillPattern(firstColSelection, gridSelection);
-    }, [fillPattern, gridSelection]);
-    const fillDown = React.useCallback(() => {
+    };
+    const fillDown = () => {
         if (gridSelection.current === undefined || gridSelection.current.range.height <= 1)
             return;
         const firstRowSelection = {
@@ -1223,8 +1317,8 @@ const DataEditorImpl = (p, forwardedRef) => {
             },
         };
         void fillPattern(firstRowSelection, gridSelection);
-    }, [fillPattern, gridSelection]);
-    const onMouseUp = React.useCallback((args, isOutside) => {
+    };
+    const onMouseUp = useStableCallback((args, isOutside) => {
         const mouse = mouseState;
         setMouseState(undefined);
         setFillHighlightRegion(undefined);
@@ -1250,6 +1344,7 @@ const DataEditorImpl = (p, forwardedRef) => {
         }
         const [col, row] = args.location;
         const [lastMouseDownCol, lastMouseDownRow] = lastMouseSelectLocation.current ?? [];
+        // eslint-disable-next-line unicorn/consistent-function-scoping
         const preventDefault = () => {
             isPrevented.current = true;
         };
@@ -1401,31 +1496,8 @@ const DataEditorImpl = (p, forwardedRef) => {
             handleMaybeClick(args);
         }
         lastMouseSelectLocation.current = undefined;
-    }, [
-        mouseState,
-        gridSelection,
-        rowMarkerOffset,
-        fillHighlightRegion,
-        fillPattern,
-        setGridSelection,
-        onCellClicked,
-        getMangledCellContent,
-        getCellRenderer,
-        cellActivationBehavior,
-        themeForCell,
-        mangledOnCellsEdited,
-        onCellActivated,
-        reselect,
-        onCellContextMenu,
-        onHeaderContextMenu,
-        onGroupHeaderContextMenu,
-        handleSelect,
-        onGroupHeaderClicked,
-        onHeaderClicked,
-        normalSizeColumn,
-        handleGroupHeaderSelection,
-    ]);
-    const onMouseMoveImpl = React.useCallback((args) => {
+    });
+    const onMouseMoveImpl = useStableCallback((args) => {
         const a = {
             ...args,
             location: [args.location[0] - rowMarkerOffset, args.location[1]],
@@ -1446,66 +1518,28 @@ const DataEditorImpl = (p, forwardedRef) => {
                 ? undefined
                 : args.scrollEdge;
         });
-    }, [mouseState, onMouseMove, rowMarkerOffset]);
-    const onHeaderMenuClickInner = React.useCallback((col, screenPosition) => {
+    });
+    const onHeaderMenuClickInner = useStableCallback((col, screenPosition) => {
         onHeaderMenuClick?.(col - rowMarkerOffset, screenPosition);
-    }, [onHeaderMenuClick, rowMarkerOffset]);
-    const onHeaderIndicatorClickInner = React.useCallback((col, screenPosition) => {
+    });
+    const onHeaderIndicatorClickInner = useStableCallback((col, screenPosition) => {
         onHeaderIndicatorClick?.(col - rowMarkerOffset, screenPosition);
-    }, [onHeaderIndicatorClick, rowMarkerOffset]);
+    });
     const currentCell = gridSelection?.current?.cell;
-    const onVisibleRegionChangedImpl = React.useCallback((region, clientWidth, clientHeight, rightElWidth, tx, ty) => {
-        hasJustScrolled.current = false;
-        let selected = currentCell;
-        if (selected !== undefined) {
-            selected = [selected[0] - rowMarkerOffset, selected[1]];
-        }
-        const freezeRegion = freezeColumns === 0
-            ? undefined
-            : {
-                x: 0,
-                y: region.y,
-                width: freezeColumns,
-                height: region.height,
-            };
-        const freezeRegions = [];
-        if (freezeRegion !== undefined)
-            freezeRegions.push(freezeRegion);
-        if (freezeTrailingRows > 0) {
-            freezeRegions.push({
-                x: region.x - rowMarkerOffset,
-                y: rows - freezeTrailingRows,
-                width: region.width,
-                height: freezeTrailingRows,
-            });
-            if (freezeColumns > 0) {
-                freezeRegions.push({
-                    x: 0,
-                    y: rows - freezeTrailingRows,
-                    width: freezeColumns,
-                    height: freezeTrailingRows,
-                });
-            }
-        }
-        const newRegion = {
-            x: region.x - rowMarkerOffset,
-            y: region.y,
-            width: region.width,
-            height: showTrailingBlankRow && region.y + region.height >= rows ? region.height - 1 : region.height,
-            tx,
-            ty,
-            extras: {
-                selected,
-                freezeRegion,
-                freezeRegions,
-            },
-        };
-        visibleRegionRef.current = newRegion;
-        regionCommitPendingRef.current = true;
-        setVisibleRegion(newRegion);
-        setClientSize([clientWidth, clientHeight, rightElWidth]);
-        onVisibleRegionChanged?.(newRegion, newRegion.tx, newRegion.ty, newRegion.extras);
-    }, [
+    const onVisibleRegionChangedImpl = React.useMemo(() => makeOnVisibleRegionChanged({
+        currentCell,
+        rowMarkerOffset,
+        showTrailingBlankRow,
+        rows,
+        freezeColumns,
+        freezeTrailingRows,
+        setVisibleRegion,
+        setClientSize,
+        onVisibleRegionChanged,
+        hasJustScrolled,
+        visibleRegionRef,
+        regionCommitPendingRef,
+    }), [
         currentCell,
         rowMarkerOffset,
         showTrailingBlankRow,
@@ -1515,17 +1549,18 @@ const DataEditorImpl = (p, forwardedRef) => {
         setVisibleRegion,
         onVisibleRegionChanged,
     ]);
-    const onColumnProposeMoveImpl = whenDefined(onColumnProposeMove, React.useCallback((startIndex, endIndex) => {
-        return onColumnProposeMove?.(startIndex - rowMarkerOffset, endIndex - rowMarkerOffset) !== false;
-    }, [onColumnProposeMove, rowMarkerOffset]));
-    const onColumnMovedImpl = whenDefined(onColumnMoved, React.useCallback((startIndex, endIndex) => {
+    // DataGridDnd calls this while rendering, so it is rebuilt when its inputs change.
+    const onColumnProposeMoveImpl = React.useMemo(() => onColumnProposeMove === undefined
+        ? undefined
+        : offsetColumnProposeMove(onColumnProposeMove, rowMarkerOffset), [onColumnProposeMove, rowMarkerOffset]);
+    const onColumnMovedImpl = whenDefined(onColumnMoved, useStableCallback((startIndex, endIndex) => {
         onColumnMoved?.(startIndex - rowMarkerOffset, endIndex - rowMarkerOffset);
         if (columnSelect !== "none") {
             setSelectedColumns(CompactSelection.fromSingleSelection(endIndex), undefined, true);
         }
-    }, [columnSelect, onColumnMoved, rowMarkerOffset, setSelectedColumns]));
+    }));
     const isActivelyDragging = React.useRef(false);
-    const onDragStartImpl = React.useCallback((args) => {
+    const onDragStartImpl = useStableCallback((args) => {
         if (args.location[0] === 0 && rowMarkerOffset > 0) {
             args.preventDefault();
             return;
@@ -1538,12 +1573,12 @@ const DataEditorImpl = (p, forwardedRef) => {
             isActivelyDragging.current = true;
         }
         setMouseState(undefined);
-    }, [onDragStart, rowMarkerOffset]);
-    const onDragEnd = React.useCallback(() => {
+    });
+    const onDragEnd = useStableCallback(() => {
         isActivelyDragging.current = false;
-    }, []);
+    });
     const rowGroupingSelectionBehavior = rowGrouping?.selectionBehavior;
-    const getSelectionRowLimits = React.useCallback((selectedRow) => {
+    const getSelectionRowLimits = (selectedRow) => {
         if (rowGroupingSelectionBehavior !== "block-spanning")
             return undefined;
         const { isGroupHeader, path, groupRows } = mapper(selectedRow);
@@ -1554,9 +1589,9 @@ const DataEditorImpl = (p, forwardedRef) => {
         const lowerBounds = selectedRow - groupRowIndex;
         const upperBounds = selectedRow + groupRows - groupRowIndex - 1;
         return [lowerBounds, upperBounds];
-    }, [mapper, rowGroupingSelectionBehavior]);
+    };
     const hoveredRef = React.useRef();
-    const onItemHoveredImpl = React.useCallback((args) => {
+    const onItemHoveredImpl = useStableCallback((args) => {
         // make sure we still have a button down
         if (mouseEventArgsAreEqual(args, hoveredRef.current))
             return;
@@ -1624,50 +1659,38 @@ const DataEditorImpl = (p, forwardedRef) => {
             }
         }
         onItemHovered?.({ ...args, location: [args.location[0] - rowMarkerOffset, args.location[1]] });
-    }, [
+    });
+    // useAutoscroll restarts its frame loop when this changes identity, and each restart skips one frame of motion.
+    // That paces a drag autoscroll, so the identity changes exactly when it did as a callback memoized over the
+    // hover handler: the dependencies after onItemHoveredImpl are the inputs of that handler and are not read here.
+    const adjustSelectionOnScroll = React.useMemo(() => makeAdjustSelectionOnScroll(hoveredRef, visibleRegionRef, mangledCols.length, rows, onItemHoveredImpl), 
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [
+        mangledCols.length,
+        rows,
+        onItemHoveredImpl,
         mouseState,
+        gridSelection,
         rowMarkerOffset,
         rowSelect,
-        gridSelection,
         rangeSelect,
         onItemHovered,
-        setSelectedRows,
         showTrailingBlankRow,
-        rows,
         allowedFillDirections,
-        getSelectionRowLimits,
-        setCurrent,
+        rangeSelectionBlending,
+        columnSelectionBlending,
+        rowSelectionBlending,
+        rangeSelectionColumnSpanning,
+        onGridSelectionChange,
+        getCellsForSelection,
+        spanRangeBehavior,
+        mapper,
+        rowGroupingSelectionBehavior,
     ]);
-    const adjustSelectionOnScroll = React.useCallback(() => {
-        const args = hoveredRef.current;
-        if (args === undefined)
-            return;
-        const [xDir, yDir] = args.scrollEdge;
-        let [col, row] = args.location;
-        const visible = visibleRegionRef.current;
-        if (xDir === -1) {
-            col = visible.extras?.freezeRegion?.x ?? visible.x;
-        }
-        else if (xDir === 1) {
-            col = visible.x + visible.width;
-        }
-        if (yDir === -1) {
-            row = Math.max(0, visible.y);
-        }
-        else if (yDir === 1) {
-            row = Math.min(rows - 1, visible.y + visible.height);
-        }
-        col = clamp(col, 0, mangledCols.length - 1);
-        row = clamp(row, 0, rows - 1);
-        onItemHoveredImpl({
-            ...args,
-            location: [col, row],
-        });
-    }, [mangledCols.length, onItemHoveredImpl, rows]);
     useAutoscroll(scrollDir, scrollRef, adjustSelectionOnScroll);
     // 1 === move one
     // 2 === move to end
-    const adjustSelection = React.useCallback((direction) => {
+    const adjustSelection = (direction) => {
         if (gridSelection.current === undefined)
             return;
         const [x, y] = direction;
@@ -1809,19 +1832,10 @@ const DataEditorImpl = (p, forwardedRef) => {
                 height: bottom - top,
             },
         }, true, false, "keyboard-select");
-    }, [
-        getCellsForSelection,
-        getSelectionRowLimits,
-        gridSelection,
-        mangledCols.length,
-        rowMarkerOffset,
-        rows,
-        scrollTo,
-        setCurrent,
-    ]);
+    };
     const scrollToActiveCellRef = React.useRef(scrollToActiveCell);
     scrollToActiveCellRef.current = scrollToActiveCell;
-    const updateSelectedCell = React.useCallback((col, row, fromEditingTrailingRow, freeMove) => {
+    const updateSelectedCell = (col, row, fromEditingTrailingRow, freeMove) => {
         const rowMax = mangledRows - (fromEditingTrailingRow ? 0 : 1);
         col = clamp(col, rowMarkerOffset, columns.length - 1 + rowMarkerOffset);
         row = clamp(row, 0, rowMax);
@@ -1856,17 +1870,8 @@ const DataEditorImpl = (p, forwardedRef) => {
             scrollTo(col - rowMarkerOffset, row);
         }
         return true;
-    }, [
-        mangledRows,
-        rowMarkerOffset,
-        columns.length,
-        currentCell,
-        gridSelection,
-        scrollTo,
-        setGridSelection,
-        setCurrent,
-    ]);
-    const onFinishEditing = React.useCallback((newValue, movement) => {
+    };
+    const onFinishEditing = useStableCallback((newValue, movement) => {
         if (overlay?.cell !== undefined && newValue !== undefined && isEditableGridCell(newValue)) {
             mangledOnCellsEdited([{ location: overlay.cell, value: newValue }]);
             window.requestAnimationFrame(() => {
@@ -1900,25 +1905,11 @@ const DataEditorImpl = (p, forwardedRef) => {
             }
         }
         onFinishedEditing?.(newValue, movement);
-    }, [
-        overlay?.cell,
-        focus,
-        gridSelection,
-        onFinishedEditing,
-        mangledOnCellsEdited,
-        mangledRows,
-        updateSelectedCell,
-        mangledCols.length,
-        appendRow,
-        appendColumn,
-        onRowAppended,
-        onColumnAppended,
-        getCustomNewRowTargetColumn,
-    ]);
+    });
     const overlayID = React.useMemo(() => {
         return `gdg-overlay-${idCounter++}`;
     }, []);
-    const deleteRange = React.useCallback((r) => {
+    const deleteRange = (r) => {
         focus();
         const editList = [];
         for (let x = r.x; x < r.x + r.width; x++) {
@@ -1952,9 +1943,9 @@ const DataEditorImpl = (p, forwardedRef) => {
         }
         mangledOnCellsEdited(editList);
         gridRef.current?.damage(editList.map(x => ({ cell: x.location })));
-    }, [focus, getCellContent, getCellRenderer, mangledOnCellsEdited, rowMarkerOffset]);
+    };
     const overlayOpen = overlay !== undefined;
-    const handleFixedKeybindings = React.useCallback((event) => {
+    const handleFixedKeybindings = (event) => {
         const cancel = () => {
             event.stopPropagation();
             event.preventDefault();
@@ -2231,36 +2222,8 @@ const DataEditorImpl = (p, forwardedRef) => {
             cancel();
         }
         return didMatch;
-    }, [
-        rowGroupingNavBehavior,
-        overlayOpen,
-        gridSelection,
-        keybindings,
-        columnSelect,
-        rowSelect,
-        rangeSelect,
-        rowMarkerOffset,
-        mapper,
-        rows,
-        updateSelectedCell,
-        setGridSelection,
-        onSelectionCleared,
-        columnsIn.length,
-        onDelete,
-        trapFocus,
-        deleteRange,
-        setSelectedColumns,
-        setSelectedRows,
-        showTrailingBlankRow,
-        getCustomNewRowTargetColumn,
-        appendRow,
-        onCellActivated,
-        reselect,
-        fillDown,
-        fillRight,
-        adjustSelection,
-    ]);
-    const onKeyDown = React.useCallback((event) => {
+    };
+    const onKeyDown = useStableCallback((event) => {
         let cancelled = false;
         if (onKeyDownIn !== undefined) {
             onKeyDownIn({
@@ -2291,9 +2254,7 @@ const DataEditorImpl = (p, forwardedRef) => {
             isReadWriteCell(getCellContent([col - rowMarkerOffset, Math.max(0, Math.min(row, rows - 1))]))) {
             const isFrozenColumn = col < freezeColumns + rowMarkerOffset;
             if ((!showTrailingBlankRow || row !== rows) &&
-                (vr.y > row ||
-                    row > vr.y + vr.height ||
-                    (!isFrozenColumn && (vr.x > col || col > vr.x + vr.width)))) {
+                (vr.y > row || row > vr.y + vr.height || (!isFrozenColumn && (vr.x > col || col > vr.x + vr.width)))) {
                 return;
             }
             const activationEvent = {
@@ -2305,20 +2266,8 @@ const DataEditorImpl = (p, forwardedRef) => {
             event.stopPropagation();
             event.preventDefault();
         }
-    }, [
-        editOnType,
-        onKeyDownIn,
-        handleFixedKeybindings,
-        gridSelection,
-        getCellContent,
-        rowMarkerOffset,
-        freezeColumns,
-        rows,
-        showTrailingBlankRow,
-        onCellActivated,
-        reselect,
-    ]);
-    const onContextMenu = React.useCallback((args, preventDefault) => {
+    });
+    const onContextMenu = useStableCallback((args, preventDefault) => {
         const adjustedCol = args.location[0] - rowMarkerOffset;
         if (args.kind === "header") {
             onHeaderContextMenu?.(adjustedCol, { ...args, preventDefault });
@@ -2339,15 +2288,8 @@ const DataEditorImpl = (p, forwardedRef) => {
                 updateSelectedCell(col, row, false, false);
             }
         }
-    }, [
-        gridSelection,
-        onCellContextMenu,
-        onGroupHeaderContextMenu,
-        onHeaderContextMenu,
-        rowMarkerOffset,
-        updateSelectedCell,
-    ]);
-    const onPasteInternal = React.useCallback(async (e) => {
+    });
+    const onPasteInternal = async (e) => {
         if (!keybindings.paste)
             return;
         function pasteToCell(inner, target, rawValue, formatted) {
@@ -2495,25 +2437,12 @@ const DataEditorImpl = (p, forwardedRef) => {
                 cell: c.location,
             })));
         }
-    }, [
-        coercePasteValue,
-        getCellRenderer,
-        getMangledCellContent,
-        gridSelection,
-        keybindings.paste,
-        scrollRef,
-        mangledCols.length,
-        mangledOnCellsEdited,
-        mangledRows,
-        onPaste,
-        rowMarkerOffset,
-        rows,
-    ]);
+    };
     useEventListener("paste", onPasteInternal, safeWindow, false, true);
     // While this function is async, we deeply prefer not to await if we don't have to. This will lead to unpacking
     // promises in rather awkward ways when possible to avoid awaiting. We have to use fallback copy mechanisms when
     // an await has happened.
-    const onCopy = React.useCallback(async (e, ignoreFocus) => {
+    const onCopy = async (e, ignoreFocus) => {
         if (!keybindings.copy)
             return;
         const focused = ignoreFocus === true ||
@@ -2591,18 +2520,9 @@ const DataEditorImpl = (p, forwardedRef) => {
                 }
             }
         }
-    }, [
-        columnsIn,
-        getCellsForSelection,
-        gridSelection,
-        keybindings.copy,
-        rowMarkerOffset,
-        scrollRef,
-        rows,
-        copyHeaders,
-    ]);
+    };
     useEventListener("copy", onCopy, safeWindow, false, false);
-    const onCut = React.useCallback(async (e) => {
+    const onCut = async (e) => {
         if (!keybindings.cut)
             return;
         const focused = scrollRef.current?.contains(document.activeElement) === true ||
@@ -2628,9 +2548,9 @@ const DataEditorImpl = (p, forwardedRef) => {
                 return;
             deleteRange(effectiveSelection.current.range);
         }
-    }, [deleteRange, gridSelection, keybindings.cut, onCopy, scrollRef, onDelete]);
+    };
     useEventListener("cut", onCut, safeWindow, false, false);
-    const onSearchResultsChanged = React.useCallback((results, navIndex) => {
+    const onSearchResultsChanged = useStableCallback((results, navIndex) => {
         if (onSearchResultsChangedIn !== undefined) {
             if (rowMarkerOffset !== 0) {
                 results = results.map(item => [item[0] - rowMarkerOffset, item[1]]);
@@ -2646,7 +2566,7 @@ const DataEditorImpl = (p, forwardedRef) => {
         }
         lastSent.current = [col, row];
         updateSelectedCell(col, row, false, false);
-    }, [onSearchResultsChangedIn, rowMarkerOffset, updateSelectedCell]);
+    });
     // this effects purpose in life is to scroll the newly selected cell into view when and ONLY when that cell
     // is from an external gridSelection change. Also note we want the unmangled out selection because scrollTo
     // expects unmangled indexes
@@ -2664,15 +2584,15 @@ const DataEditorImpl = (p, forwardedRef) => {
         }
         hasJustScrolled.current = false; //only allow skipping a single scroll
     }, [outCol, outRow]);
-    const runPendingScrollTo = React.useCallback(() => {
+    const runPendingScrollTo = useStableCallback(() => {
         const pending = pendingScrollToRef.current;
         if (pending !== undefined)
             scrollToRef.current(...pending);
-    }, []);
-    const onScrollProcessed = React.useCallback((left, top) => {
+    });
+    const onScrollProcessed = useStableCallback((left, top) => {
         processedScrollRef.current = { left, top };
         runPendingScrollTo();
-    }, [runPendingScrollTo]);
+    });
     React.useLayoutEffect(() => {
         regionCommitPendingRef.current = false;
         runPendingScrollTo();
@@ -2690,23 +2610,22 @@ const DataEditorImpl = (p, forwardedRef) => {
         }
         return CompactSelection.empty();
     }, [mangledRows, showTrailingBlankRow, trailingRowOptions?.tint]);
-    const mangledVerticalBorder = React.useCallback((col) => {
-        return typeof verticalBorder === "boolean"
-            ? verticalBorder
-            : (verticalBorder?.(col - rowMarkerOffset) ?? true);
-    }, [rowMarkerOffset, verticalBorder]);
+    const mangledVerticalBorder = React.useMemo(() => offsetVerticalBorder(verticalBorder, rowMarkerOffset), [rowMarkerOffset, verticalBorder]);
+    const onRenameGroupClose = useStableCallback(() => setRenameGroup(undefined));
+    const onRenameGroupFinish = useStableCallback((newVal) => {
+        setRenameGroup(undefined);
+        if (renameGroup !== undefined)
+            onGroupHeaderRenamed?.(renameGroup.group, newVal);
+    });
     const renameGroupNode = React.useMemo(() => {
         if (renameGroup === undefined || canvasRef.current === null)
             return null;
         const { bounds, group } = renameGroup;
         const canvasBounds = canvasRef.current.getBoundingClientRect();
-        return (React.createElement(GroupRename, { bounds: bounds, group: group, canvasBounds: canvasBounds, onClose: () => setRenameGroup(undefined), onFinish: newVal => {
-                setRenameGroup(undefined);
-                onGroupHeaderRenamed?.(group, newVal);
-            } }));
-    }, [onGroupHeaderRenamed, renameGroup]);
+        return (React.createElement(GroupRename, { bounds: bounds, group: group, canvasBounds: canvasBounds, onClose: onRenameGroupClose, onFinish: onRenameGroupFinish }));
+    }, [onRenameGroupClose, onRenameGroupFinish, renameGroup]);
     const mangledFreezeColumns = Math.min(mangledCols.length, freezeColumns + (hasRowMarkers ? 1 : 0));
-    React.useImperativeHandle(forwardedRef, () => ({
+    const handle = {
         appendRow: (col, openOverlay) => appendRow(col + rowMarkerOffset, openOverlay),
         appendColumn: (row, openOverlay) => appendColumn(row, openOverlay),
         updateCells: damageList => {
@@ -2810,19 +2729,12 @@ const DataEditorImpl = (p, forwardedRef) => {
                 location: [args.location[0] - rowMarkerOffset, args.location[1]],
             };
         },
-    }), [
-        appendRow,
-        appendColumn,
-        normalSizeColumn,
-        scrollRef,
-        onCopy,
-        onKeyDown,
-        onPasteInternal,
-        rowMarkerOffset,
-        scrollTo,
-    ]);
+    };
+    // The forwarded handle keeps one identity and calls into the latest render.
+    const latestHandle = useLatest(handle);
+    React.useImperativeHandle(forwardedRef, () => forwardDataEditorRef(latestHandle), [latestHandle]);
     const [selCol, selRow] = currentCell ?? [];
-    const onCellFocused = React.useCallback((cell) => {
+    const onCellFocused = useStableCallback((cell) => {
         const [col, row] = cell;
         if (row === -1) {
             if (columnSelect !== "none") {
@@ -2838,12 +2750,10 @@ const DataEditorImpl = (p, forwardedRef) => {
             range: { x: col, y: row, width: 1, height: 1 },
         }, true, false, "keyboard-nav");
         scrollTo(col, row);
-    }, [columnSelect, focus, scrollTo, selCol, selRow, setCurrent, setSelectedColumns]);
+    });
     const [isFocused, setIsFocused] = React.useState(false);
-    const setIsFocusedDebounced = React.useRef(debounce((val) => {
-        setIsFocused(val);
-    }, 5));
-    const onCanvasFocused = React.useCallback(() => {
+    const [setIsFocusedDebounced] = React.useState(() => ({ current: debounce(setIsFocused, 5) }));
+    const onCanvasFocused = useStableCallback(() => {
         setIsFocusedDebounced.current(true);
         onGridFocused?.();
         // check for mouse state, don't do anything if the user is clicked to focus.
@@ -2861,11 +2771,11 @@ const DataEditorImpl = (p, forwardedRef) => {
                 },
             }, true, false, "keyboard-select");
         }
-    }, [cellYOffset, gridSelection, mouseState, rowMarkerOffset, setCurrent]);
-    const onFocusOut = React.useCallback(() => {
+    });
+    const onFocusOut = useStableCallback(() => {
         setIsFocusedDebounced.current(false);
         onGridBlurred?.();
-    }, [onGridBlurred]);
+    });
     const [idealWidth, idealHeight] = React.useMemo(() => {
         let h;
         const scrollbarWidth = experimental?.scrollbarWidthOverride ?? getScrollBarWidth();

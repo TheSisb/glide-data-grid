@@ -1,29 +1,11 @@
 import * as React from "react";
 import DataGridDnd, {} from "../data-grid-dnd/data-grid-dnd.js";
 import { InfiniteScroller } from "./infinite-scroller.js";
-const GridScroller = p => {
-    const { columns, rows, rowHeight, headerHeight, groupHeaderHeight, enableGroups, freezeColumns, experimental, nonGrowWidth, clientSize, className, onVisibleRegionChanged, scrollRef, onScrollProcessed, preventDiagonalScrolling, rightElement, rightElementProps, overscrollX, overscrollY, initialSize, smoothScrollX = false, smoothScrollY = false, isDraggable, } = p;
-    const { paddingRight, paddingBottom } = experimental ?? {};
-    const [clientWidth, clientHeight] = clientSize;
-    const last = React.useRef();
-    const lastX = React.useRef();
-    const lastY = React.useRef();
-    const lastSize = React.useRef();
-    const width = nonGrowWidth + Math.max(0, overscrollX ?? 0);
-    let height = enableGroups ? headerHeight + groupHeaderHeight : headerHeight;
-    if (typeof rowHeight === "number") {
-        height += rows * rowHeight;
-    }
-    else {
-        for (let r = 0; r < rows; r++) {
-            height += rowHeight(r);
-        }
-    }
-    if (overscrollY !== undefined) {
-        height += overscrollY;
-    }
-    const lastArgs = React.useRef();
-    const processArgs = React.useCallback(() => {
+// The two functions below are module level so that what they return holds its arguments and nothing from a render.
+// The scroller reprocesses its position whenever they change identity, so they are rebuilt when their inputs change.
+function makeProcessArgs(inputs) {
+    const { columns, rowHeight, rows, onVisibleRegionChanged, freezeColumns, smoothScrollX, smoothScrollY, lastArgs, last, lastX, lastY, lastSize, } = inputs;
+    return () => {
         if (lastArgs.current === undefined)
             return;
         const args = { ...lastArgs.current };
@@ -136,11 +118,51 @@ const GridScroller = p => {
             lastY.current = ty;
             lastSize.current = [args.width, args.height];
         }
-    }, [columns, rowHeight, rows, onVisibleRegionChanged, freezeColumns, smoothScrollX, smoothScrollY]);
-    const onScrollUpdate = React.useCallback((args) => {
+    };
+}
+function makeOnScrollUpdate(lastArgs, processArgs) {
+    return args => {
         lastArgs.current = args;
         processArgs();
-    }, [processArgs]);
+    };
+}
+const GridScroller = p => {
+    const { columns, rows, rowHeight, headerHeight, groupHeaderHeight, enableGroups, freezeColumns, experimental, nonGrowWidth, clientSize, className, onVisibleRegionChanged, scrollRef, onScrollProcessed, preventDiagonalScrolling, rightElement, rightElementProps, overscrollX, overscrollY, initialSize, smoothScrollX = false, smoothScrollY = false, isDraggable, } = p;
+    const { paddingRight, paddingBottom } = experimental ?? {};
+    const [clientWidth, clientHeight] = clientSize;
+    const last = React.useRef();
+    const lastX = React.useRef();
+    const lastY = React.useRef();
+    const lastSize = React.useRef();
+    const width = nonGrowWidth + Math.max(0, overscrollX ?? 0);
+    let height = enableGroups ? headerHeight + groupHeaderHeight : headerHeight;
+    if (typeof rowHeight === "number") {
+        height += rows * rowHeight;
+    }
+    else {
+        for (let r = 0; r < rows; r++) {
+            height += rowHeight(r);
+        }
+    }
+    if (overscrollY !== undefined) {
+        height += overscrollY;
+    }
+    const lastArgs = React.useRef();
+    const processArgs = React.useMemo(() => makeProcessArgs({
+        columns,
+        rowHeight,
+        rows,
+        onVisibleRegionChanged,
+        freezeColumns,
+        smoothScrollX,
+        smoothScrollY,
+        lastArgs,
+        last,
+        lastX,
+        lastY,
+        lastSize,
+    }), [columns, rowHeight, rows, onVisibleRegionChanged, freezeColumns, smoothScrollX, smoothScrollY]);
+    const onScrollUpdate = React.useMemo(() => makeOnScrollUpdate(lastArgs, processArgs), [processArgs]);
     React.useEffect(() => {
         processArgs();
     }, [processArgs]);

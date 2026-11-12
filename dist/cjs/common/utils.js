@@ -62,17 +62,24 @@ export const Checkmark = (props) => {
     return (React.createElement("svg", { viewBox: "0 0 24 24", fill: "none", xmlns: "http://www.w3.org/2000/svg" },
         React.createElement("path", { d: "M19 6L10.3802 17L5.34071 11.8758", vectorEffect: "non-scaling-stroke", stroke: fg, strokeWidth: "1.5", strokeLinecap: "round", strokeLinejoin: "round" })));
 };
-export function useDebouncedMemo(factory, deps, time) {
-    const [state, setState] = React.useState(factory);
-    const mountedRef = React.useRef(true);
-    React.useEffect(() => () => {
+// The two functions below are module level so that what they return holds its arguments and nothing from a render.
+function markUnmounted(mountedRef) {
+    return () => {
         mountedRef.current = false;
-    }, []);
-    const debouncedSetState = React.useRef(debounce(x => {
+    };
+}
+function debounceWhileMounted(mountedRef, setState, time) {
+    return debounce((x) => {
         if (mountedRef.current) {
             setState(x);
         }
-    }, time));
+    }, time);
+}
+export function useDebouncedMemo(factory, deps, time) {
+    const [state, setState] = React.useState(factory);
+    const mountedRef = React.useRef(true);
+    React.useEffect(() => markUnmounted(mountedRef), []);
+    const [debouncedSetState] = React.useState(() => ({ current: debounceWhileMounted(mountedRef, setState, time) }));
     React.useLayoutEffect(() => {
         if (mountedRef.current) {
             debouncedSetState.current(() => factory());
@@ -140,7 +147,12 @@ export function useStateWithReactiveInput(inputState) {
     const [state, setState] = React.useState(inputState);
     // crimes against humanity here
     const [, forceRender] = React.useState();
-    const setStateOuter = React.useCallback(nv => {
+    const [[setStateOuter, onEmpty]] = React.useState(() => makeReactiveSetters(inputStateRef, setState, forceRender));
+    return [inputStateRef.current[0] === empty ? state : inputStateRef.current[0], setStateOuter, onEmpty];
+}
+// Module level so that the returned functions hold their arguments and nothing from a render.
+function makeReactiveSetters(inputStateRef, setState, forceRender) {
+    const setStateOuter = nv => {
         // this takes care of the case where the inputState was set, then setState gets called again but back to what
         // the state was before the inputState changed. Since the useState effect wont trigger a render in this case
         // we need to be very naughty and force it to see the change. Technically this may not be needed some chunk of
@@ -160,12 +172,12 @@ export function useStateWithReactiveInput(inputState) {
             return nv;
         });
         inputStateRef.current[0] = empty;
-    }, []);
-    const onEmpty = React.useCallback(() => {
+    };
+    const onEmpty = () => {
         inputStateRef.current[0] = empty;
         forceRender({});
-    }, []);
-    return [inputStateRef.current[0] === empty ? state : inputStateRef.current[0], setStateOuter, onEmpty];
+    };
+    return [setStateOuter, onEmpty];
 }
 export function makeAccessibilityStringForArray(arr) {
     // this is basically just .join(", ") but checks to make sure it is not going to allocate

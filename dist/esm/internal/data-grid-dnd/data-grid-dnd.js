@@ -2,11 +2,31 @@
 import clamp from "lodash/clamp.js";
 import * as React from "react";
 import DataGrid, {} from "../data-grid/data-grid.js";
+import { useStableCallback } from "../../common/use-stable-callback.js";
 // Dear Past Jason,
 // Wtf does this function do? If you remember in the future come back and add a comment
 // -- Future-Past Jason
 function offsetColumnSize(column, width, min, max) {
     return clamp(Math.round(width - (column.growOffset ?? 0)), Math.ceil(min), Math.floor(max));
+}
+// Module level so that the returned function holds its arguments and nothing from a render.
+function reorderRows(getCellContent, dragRow, dropRow) {
+    return (cell, forceStrict) => {
+        if (dragRow === undefined || dropRow === undefined)
+            return getCellContent(cell, forceStrict);
+        // eslint-disable-next-line prefer-const
+        let [col, row] = cell;
+        if (row === dropRow) {
+            row = dragRow;
+        }
+        else {
+            if (row > dropRow)
+                row -= 1;
+            if (row >= dragRow)
+                row += 1;
+        }
+        return getCellContent([col, row], forceStrict);
+    };
 }
 const DataGridDnd = p => {
     const [resizeColStartX, setResizeColStartX] = React.useState();
@@ -23,7 +43,7 @@ const DataGridDnd = p => {
     const canResize = (onColumnResize ?? onColumnResizeEnd ?? onColumnResizeStart) !== undefined;
     const { columns, selection } = p;
     const selectedColumns = selection.columns;
-    const onItemHoveredImpl = React.useCallback((args) => {
+    const onItemHoveredImpl = useStableCallback((args) => {
         const [col, row] = args.location;
         if (dragCol !== undefined && dropCol !== col && col >= lockColumns) {
             setDragColActive(true);
@@ -37,9 +57,9 @@ const DataGridDnd = p => {
         else if (resizeCol === undefined && !dragColActive && !dragRowActive) {
             onItemHovered?.(args);
         }
-    }, [dragCol, dragRow, dropCol, onItemHovered, lockColumns, resizeCol, dragColActive, dragRowActive]);
+    });
     const canDragCol = onColumnMoved !== undefined;
-    const onMouseDownImpl = React.useCallback((args) => {
+    const onMouseDownImpl = useStableCallback((args) => {
         if (args.button === 0) {
             const [col, row] = args.location;
             if (args.kind === "out-of-bounds" && args.isEdge && canResize) {
@@ -74,19 +94,19 @@ const DataGridDnd = p => {
             }
         }
         onMouseDown?.(args);
-    }, [onMouseDown, canResize, lockColumns, onRowMoved, gridRef, columns, canDragCol, onColumnResizeStart, canvasRef]);
-    const onHeaderMenuClickMangled = React.useCallback((col, screenPosition) => {
+    });
+    const onHeaderMenuClickMangled = useStableCallback((col, screenPosition) => {
         if (dragColActive || dragRowActive)
             return;
         onHeaderMenuClick?.(col, screenPosition);
-    }, [dragColActive, dragRowActive, onHeaderMenuClick]);
-    const onHeaderIndicatorClickMangled = React.useCallback((col, screenPosition) => {
+    });
+    const onHeaderIndicatorClickMangled = useStableCallback((col, screenPosition) => {
         if (dragColActive || dragRowActive)
             return;
         onHeaderIndicatorClick?.(col, screenPosition);
-    }, [dragColActive, dragRowActive, onHeaderIndicatorClick]);
+    });
     const lastResizeWidthRef = React.useRef(-1);
-    const clearAll = React.useCallback(() => {
+    const clearAll = () => {
         lastResizeWidthRef.current = -1;
         setDragRow(undefined);
         setDropRow(undefined);
@@ -98,8 +118,8 @@ const DataGridDnd = p => {
         setDragColActive(false);
         setResizeCol(undefined);
         setResizeColStartX(undefined);
-    }, []);
-    const onMouseUpImpl = React.useCallback((args, isOutside) => {
+    };
+    const onMouseUpImpl = useStableCallback((args, isOutside) => {
         if (args.button === 0) {
             if (resizeCol !== undefined) {
                 // if the column is in selection, the selection may contain extra cols, so lets just re-send the last
@@ -134,24 +154,7 @@ const DataGridDnd = p => {
             }
         }
         onMouseUp?.(args, isOutside);
-    }, [
-        onMouseUp,
-        resizeCol,
-        dragCol,
-        dropCol,
-        dragRow,
-        dropRow,
-        selectedColumns,
-        onColumnResizeEnd,
-        columns,
-        minColumnWidth,
-        maxColumnWidth,
-        onColumnResize,
-        onColumnMoved,
-        onRowMoved,
-        clearAll,
-        onColumnProposeMove,
-    ]);
+    });
     const dragOffset = React.useMemo(() => {
         if (dragCol === undefined || dropCol === undefined)
             return undefined;
@@ -164,7 +167,7 @@ const DataGridDnd = p => {
             dest: dropCol,
         };
     }, [dragCol, dropCol, onColumnProposeMove]);
-    const onMouseMove = React.useCallback((event) => {
+    const onMouseMove = useStableCallback((event) => {
         const canvas = canvasRef?.current;
         if (dragCol !== undefined && dragStartX !== undefined) {
             const diff = Math.abs(event.clientX - dragStartX);
@@ -196,42 +199,14 @@ const DataGridDnd = p => {
                 }
             }
         }
-    }, [
-        dragCol,
-        dragStartX,
-        dragRow,
-        dragStartY,
-        resizeCol,
-        resizeColStartX,
-        columns,
-        minColumnWidth,
-        maxColumnWidth,
-        onColumnResize,
-        selectedColumns,
-        canvasRef,
-    ]);
-    const getMangledCellContent = React.useCallback((cell, forceStrict) => {
-        if (dragRow === undefined || dropRow === undefined)
-            return getCellContent(cell, forceStrict);
-        // eslint-disable-next-line prefer-const
-        let [col, row] = cell;
-        if (row === dropRow) {
-            row = dragRow;
-        }
-        else {
-            if (row > dropRow)
-                row -= 1;
-            if (row >= dragRow)
-                row += 1;
-        }
-        return getCellContent([col, row], forceStrict);
-    }, [dragRow, dropRow, getCellContent]);
-    const onDragStartImpl = React.useCallback(args => {
+    });
+    const getMangledCellContent = React.useMemo(() => reorderRows(getCellContent, dragRow, dropRow), [dragRow, dropRow, getCellContent]);
+    const onDragStartImpl = useStableCallback(args => {
         onDragStart?.(args);
         if (!args.defaultPrevented()) {
             clearAll();
         }
-    }, [clearAll, onDragStart]);
+    });
     return (React.createElement(DataGrid, { accessibilityHeight: p.accessibilityHeight, canvasRef: p.canvasRef, cellXOffset: p.cellXOffset, cellYOffset: p.cellYOffset, columns: p.columns, disabledRows: p.disabledRows, drawFocusRing: p.drawFocusRing, drawHeader: p.drawHeader, drawCell: p.drawCell, enableGroups: p.enableGroups, eventTargetRef: p.eventTargetRef, experimental: p.experimental, fillHandle: p.fillHandle, firstColAccessible: p.firstColAccessible, fixedShadowX: p.fixedShadowX, fixedShadowY: p.fixedShadowY, freezeColumns: p.freezeColumns, getCellRenderer: p.getCellRenderer, getGroupDetails: p.getGroupDetails, getRowThemeOverride: p.getRowThemeOverride, groupHeaderHeight: p.groupHeaderHeight, headerHeight: p.headerHeight, headerIcons: p.headerIcons, height: p.height, highlightRegions: p.highlightRegions, imageWindowLoader: p.imageWindowLoader, resizeColumn: resizeCol, isDraggable: p.isDraggable, isFilling: p.isFilling, isFocused: p.isFocused, onCanvasBlur: p.onCanvasBlur, onCanvasFocused: p.onCanvasFocused, onCellFocused: p.onCellFocused, onContextMenu: p.onContextMenu, onDragEnd: p.onDragEnd, onDragLeave: p.onDragLeave, onDragOverCell: p.onDragOverCell, onDrop: p.onDrop, onKeyDown: p.onKeyDown, onKeyUp: p.onKeyUp, onMouseMove: p.onMouseMove, prelightCells: p.prelightCells, rowHeight: p.rowHeight, rows: p.rows, selection: p.selection, smoothScrollX: p.smoothScrollX, smoothScrollY: p.smoothScrollY, theme: p.theme, freezeTrailingRows: p.freezeTrailingRows, hasAppendRow: p.hasAppendRow, translateX: p.translateX, translateY: p.translateY, resizeIndicator: p.resizeIndicator, verticalBorder: p.verticalBorder, width: p.width, getCellContent: getMangledCellContent, isResizing: resizeCol !== undefined, onHeaderMenuClick: onHeaderMenuClickMangled, onHeaderIndicatorClick: onHeaderIndicatorClickMangled, isDragging: dragColActive, onItemHovered: onItemHoveredImpl, onDragStart: onDragStartImpl, onMouseDown: onMouseDownImpl, allowResize: canResize, onMouseUp: onMouseUpImpl, dragAndDropState: dragOffset, onMouseMoveRaw: onMouseMove, ref: gridRef }));
 };
 export default DataGridDnd;

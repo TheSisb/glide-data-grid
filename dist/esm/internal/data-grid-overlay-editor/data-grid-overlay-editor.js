@@ -5,6 +5,7 @@ import { makeCSSStyle, ThemeContext } from "../../common/styles.js";
 import { isEditableGridCell, isInnerOnlyCell, isObjectEditorCallbackResult, } from "../data-grid/data-grid-types.js";
 import { DataGridOverlayEditorStyle } from "./data-grid-overlay-editor-style.js";
 import { useStayOnScreen } from "./use-stay-on-screen.js";
+import { useStableCallback } from "../../common/use-stable-callback.js";
 const DataGridOverlayEditor = p => {
     const { target, content, onFinishEditing: onFinishEditingIn, forceEditMode, initialValue, imageEditorOverride, markdownDivCreateNode, highlight, className, theme, id, cell, bloom, portalElementRef, validateCell, getCellRenderer, provideEditor, isOutsideClick, customEventTarget, activation, } = p;
     const [tempValue, setTempValueRaw] = React.useState(forceEditMode ? content : undefined);
@@ -15,10 +16,10 @@ const DataGridOverlayEditor = p => {
             return true;
         return !(isEditableGridCell(content) && validateCell?.(cell, content, lastValueRef.current) === false);
     });
-    const onFinishEditing = React.useCallback((newCell, movement) => {
+    const onFinishEditing = useStableCallback((newCell, movement) => {
         onFinishEditingIn(isValid ? newCell : undefined, movement);
-    }, [isValid, onFinishEditingIn]);
-    const setTempValue = React.useCallback((newVal) => {
+    });
+    const setTempValue = useStableCallback((newVal) => {
         if (validateCell !== undefined && newVal !== undefined && isEditableGridCell(newVal)) {
             const validResult = validateCell(cell, newVal, lastValueRef.current);
             if (validResult === false) {
@@ -33,18 +34,18 @@ const DataGridOverlayEditor = p => {
             }
         }
         setTempValueRaw(newVal);
-    }, [cell, validateCell]);
+    });
     const finished = React.useRef(false);
     const customMotion = React.useRef(undefined);
-    const onClickOutside = React.useCallback(() => {
+    const onClickOutside = useStableCallback(() => {
         onFinishEditing(tempValue, [0, 0]);
         finished.current = true;
-    }, [tempValue, onFinishEditing]);
-    const onEditorFinished = React.useCallback((newValue, movement) => {
+    });
+    const onEditorFinished = useStableCallback((newValue, movement) => {
         onFinishEditing(newValue, movement ?? customMotion.current ?? [0, 0]);
         finished.current = true;
-    }, [onFinishEditing]);
-    const onKeyDown = React.useCallback(async (event) => {
+    });
+    const onKeyDown = useStableCallback(async (event) => {
         let save = false;
         if (event.key === "Escape") {
             event.stopPropagation();
@@ -72,7 +73,7 @@ const DataGridOverlayEditor = p => {
                 finished.current = true;
             }
         }, 0);
-    }, [onFinishEditing, tempValue]);
+    });
     const targetValue = tempValue ?? content;
     const [editorProvider, useLabel] = React.useMemo(() => {
         if (isInnerOnlyCell(content))

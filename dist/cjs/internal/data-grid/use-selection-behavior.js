@@ -1,8 +1,8 @@
-import React from "react";
 import { CompactSelection } from "./data-grid-types.js";
+import { useStableCallback } from "../../common/use-stable-callback.js";
 export function useSelectionBehavior(gridSelection, setGridSelection, rangeBehavior, columnBehavior, rowBehavior, rangeSelect, rangeSelectionColumnSpanning) {
     // if append is true, the current range will be added to the rangeStack
-    const setCurrent = React.useCallback((value, expand, append, trigger) => {
+    const setCurrent = useStableCallback((value, expand, append, trigger) => {
         if ((rangeSelect === "cell" || rangeSelect === "multi-cell") && value !== undefined) {
             value = {
                 ...value,
@@ -48,16 +48,8 @@ export function useSelectionBehavior(gridSelection, setGridSelection, rangeBehav
             };
         }
         setGridSelection(newVal, expand);
-    }, [
-        columnBehavior,
-        gridSelection,
-        rangeBehavior,
-        rangeSelect,
-        rangeSelectionColumnSpanning,
-        rowBehavior,
-        setGridSelection,
-    ]);
-    const setSelectedRows = React.useCallback((newRows, append, allowMixed) => {
+    });
+    const setSelectedRows = useStableCallback((newRows, append, allowMixed) => {
         newRows = newRows ?? gridSelection.rows;
         if (append !== undefined) {
             newRows = newRows.add(append);
@@ -81,8 +73,8 @@ export function useSelectionBehavior(gridSelection, setGridSelection, rangeBehav
             };
         }
         setGridSelection(newVal, false);
-    }, [columnBehavior, gridSelection, rangeBehavior, rowBehavior, setGridSelection]);
-    const setSelectedColumns = React.useCallback((newCols, append, allowMixed) => {
+    });
+    const setSelectedColumns = useStableCallback((newCols, append, allowMixed) => {
         newCols = newCols ?? gridSelection.columns;
         if (append !== undefined) {
             newCols = newCols.add(append);
@@ -106,7 +98,7 @@ export function useSelectionBehavior(gridSelection, setGridSelection, rangeBehav
             };
         }
         setGridSelection(newVal, false);
-    }, [columnBehavior, gridSelection, rangeBehavior, rowBehavior, setGridSelection]);
+    });
     return [setCurrent, setSelectedRows, setSelectedColumns];
 }
 //# sourceMappingURL=use-selection-behavior.js.map

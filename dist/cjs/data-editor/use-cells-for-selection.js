@@ -1,7 +1,8 @@
 import * as React from "react";
 import { GridCellKind } from "../internal/data-grid/data-grid-types.js";
-export function useCellsForSelection(getCellsForSelectionIn, getCellContent, rowMarkerOffset, abortController, rows) {
-    const getCellsForSelectionDirectWhenValid = React.useCallback(rect => {
+// Module level so that the returned functions hold their arguments and nothing from a render.
+function makeGetCellsForSelectionDirect(getCellsForSelectionIn, getCellContent, rows, abortSignal) {
+    return rect => {
         if (getCellsForSelectionIn === true) {
             const result = [];
             for (let y = rect.y; y < rect.y + rect.height; y++) {
@@ -21,12 +22,11 @@ export function useCellsForSelection(getCellsForSelectionIn, getCellContent, row
             }
             return result;
         }
-        return getCellsForSelectionIn?.(rect, abortController.signal) ?? [];
-    }, [abortController.signal, getCellContent, getCellsForSelectionIn, rows]);
-    const getCellsForSelectionDirect = getCellsForSelectionIn !== undefined ? getCellsForSelectionDirectWhenValid : undefined;
-    const getCellsForSelectionMangled = React.useCallback(rect => {
-        if (getCellsForSelectionDirect === undefined)
-            return [];
+        return getCellsForSelectionIn(rect, abortSignal) ?? [];
+    };
+}
+function makeGetCellsForSelectionMangled(getCellsForSelectionDirect, rowMarkerOffset, abortSignal) {
+    return rect => {
         const newRect = {
             ...rect,
             x: rect.x - rowMarkerOffset,
@@ -34,20 +34,25 @@ export function useCellsForSelection(getCellsForSelectionIn, getCellContent, row
         if (newRect.x < 0) {
             newRect.x = 0;
             newRect.width--;
-            const r = getCellsForSelectionDirect(newRect, abortController.signal);
+            const r = getCellsForSelectionDirect(newRect, abortSignal);
             if (typeof r === "function") {
                 return async () => 
                 // eslint-disable-next-line unicorn/no-await-expression-member
-                (await r()).map(row => [
-                    { kind: GridCellKind.Loading, allowOverlay: false },
-                    ...row,
-                ]);
+                (await r()).map(row => [{ kind: GridCellKind.Loading, allowOverlay: false }, ...row]);
             }
             return r.map(row => [{ kind: GridCellKind.Loading, allowOverlay: false }, ...row]);
         }
-        return getCellsForSelectionDirect(newRect, abortController.signal);
-    }, [abortController.signal, getCellsForSelectionDirect, rowMarkerOffset]);
-    const getCellsForSelection = getCellsForSelectionIn !== undefined ? getCellsForSelectionMangled : undefined;
+        return getCellsForSelectionDirect(newRect, abortSignal);
+    };
+}
+export function useCellsForSelection(getCellsForSelectionIn, getCellContent, rowMarkerOffset, abortController, rows) {
+    const abortSignal = abortController.signal;
+    const getCellsForSelectionDirect = React.useMemo(() => getCellsForSelectionIn === undefined
+        ? undefined
+        : makeGetCellsForSelectionDirect(getCellsForSelectionIn, getCellContent, rows, abortSignal), [abortSignal, getCellContent, getCellsForSelectionIn, rows]);
+    const getCellsForSelection = React.useMemo(() => getCellsForSelectionDirect === undefined
+        ? undefined
+        : makeGetCellsForSelectionMangled(getCellsForSelectionDirect, rowMarkerOffset, abortSignal), [abortSignal, getCellsForSelectionDirect, rowMarkerOffset]);
     return [getCellsForSelection, getCellsForSelectionDirect];
 }
 //# sourceMappingURL=use-cells-for-selection.js.map

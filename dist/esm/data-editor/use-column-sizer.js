@@ -24,6 +24,14 @@ export function measureColumn(ctx, theme, c, colIndex, selectedData, minColumnWi
         width: Math.max(Math.ceil(minColumnWidth), Math.min(Math.floor(maxColumnWidth), Math.ceil(max))),
     };
 }
+// Module level so that the cleanup holds the canvas and nothing from a render.
+function attachToDocument(canvas) {
+    if (canvas)
+        document.documentElement.append(canvas);
+    return () => {
+        canvas?.remove();
+    };
+}
 /** @category Hooks */
 export function useColumnSizer(columns, rows, getCellsForSelection, clientWidth, minColumnWidth, maxColumnWidth, theme, getCellRenderer, abortController) {
     const rowsRef = React.useRef(rows);
@@ -41,13 +49,7 @@ export function useColumnSizer(columns, rows, getCellsForSelection, clientWidth,
         offscreen.style["position"] = "fixed";
         return [offscreen, offscreen.getContext("2d", { alpha: false })];
     }, []);
-    React.useLayoutEffect(() => {
-        if (canvas)
-            document.documentElement.append(canvas);
-        return () => {
-            canvas?.remove();
-        };
-    }, [canvas]);
+    React.useLayoutEffect(() => attachToDocument(canvas), [canvas]);
     const memoMap = React.useRef({});
     const lastColumns = React.useRef();
     const [selectedData, setSelectionData] = React.useState();

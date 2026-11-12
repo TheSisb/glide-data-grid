@@ -1,25 +1,28 @@
 import * as React from "react";
 import { useStateWithReactiveInput } from "../common/utils.js";
+// Module level so that the facade holds the state object and nothing from a render.
+function makeCallbackRefFacade(state) {
+    return {
+        get current() {
+            return state.value;
+        },
+        set current(value) {
+            const last = state.value;
+            if (last !== value) {
+                state.value = value;
+                state.callback(value, last);
+            }
+        },
+    };
+}
 // shamelessly stolen and modified from: https://github.com/theKashey/use-callback-ref
 // MIT License https://github.com/theKashey/use-callback-ref/tree/master?tab=MIT-1-ov-file#readme
 function useCallbackRef(initialValue, callback) {
-    const [ref] = React.useState(() => ({
-        value: initialValue,
-        callback,
-        facade: {
-            get current() {
-                return ref.value;
-            },
-            set current(value) {
-                const last = ref.value;
-                if (last !== value) {
-                    ref.value = value;
-                    ref.callback(value, last);
-                }
-            },
-        },
-    }));
-    ref.callback = callback;
+    const [ref] = React.useState(() => {
+        const state = { value: initialValue, callback };
+        return { state, facade: makeCallbackRefFacade(state) };
+    });
+    ref.state.callback = callback;
     return ref.facade;
 }
 export function useInitialScrollOffset(scrollOffsetX, scrollOffsetY, rowHeight, visibleRegionRef, onDidScroll) {

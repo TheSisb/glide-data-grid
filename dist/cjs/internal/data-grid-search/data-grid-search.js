@@ -4,6 +4,7 @@ import { GridCellKind, } from "../data-grid/data-grid-types.js";
 import ScrollingDataGrid from "../scrolling-data-grid/scrolling-data-grid.js";
 import { SearchWrapper } from "./data-grid-search-style.js";
 import { assert } from "../../common/support.js";
+import { useStableCallback } from "../../common/use-stable-callback.js";
 // icons
 const upArrow = (React.createElement("svg", { className: "button-icon", viewBox: "0 0 512 512" },
     React.createElement("path", { fill: "none", stroke: "currentColor", strokeLinecap: "round", strokeLinejoin: "round", strokeWidth: "48", d: "M112 244l144-144 144 144M256 120v292" })));
@@ -12,16 +13,37 @@ const downArrow = (React.createElement("svg", { className: "button-icon", viewBo
 const closeX = (React.createElement("svg", { className: "button-icon", viewBox: "0 0 512 512" },
     React.createElement("path", { fill: "none", stroke: "currentColor", strokeLinecap: "round", strokeLinejoin: "round", strokeWidth: "32", d: "M368 368L144 144M368 144L144 368" })));
 const targetSearchTimeMS = 10;
+// The functions below are module level so that they hold their arguments and nothing from a render.
+function cancelEvent(ev) {
+    ev.stopPropagation();
+}
+function makeCancelSearch(searchHandle, abortControllerRef) {
+    return () => {
+        if (searchHandle.current !== undefined) {
+            window.cancelAnimationFrame(searchHandle.current);
+            searchHandle.current = undefined;
+        }
+        // Always abort and replace the controller to ensure a fresh, non-aborted signal
+        if (abortControllerRef.current !== undefined) {
+            abortControllerRef.current.abort();
+        }
+        abortControllerRef.current = new AbortController();
+    };
+}
+function clearAnimatingOutLater(setIsAnimatingOut) {
+    const timeoutId = setTimeout(setIsAnimatingOut, 150, false);
+    return () => clearTimeout(timeoutId);
+}
 const DataGridSearch = p => {
     const { canvasRef, cellYOffset, rows, columns, searchInputRef, searchValue, searchResults: searchResultsIn, onSearchValueChange, getCellsForSelection, onSearchResultsChanged, showSearch = false, onSearchClose, } = p;
     const [searchID] = React.useState(() => "search-box-" + Math.round(Math.random() * 1000));
     const [searchStringInner, setSearchStringInner] = React.useState("");
     const searchString = searchValue ?? searchStringInner;
     // always emit both, this allows the user to spy on the search value without controlling it.
-    const setSearchString = React.useCallback((newVal) => {
+    const setSearchString = (newVal) => {
         setSearchStringInner(newVal);
         onSearchValueChange?.(newVal);
-    }, [onSearchValueChange]);
+    };
     const [searchStatus, setSearchStatus] = React.useState();
     const searchStatusRef = React.useRef(searchStatus);
     searchStatusRef.current = searchStatus;
@@ -45,20 +67,10 @@ const DataGridSearch = p => {
     const searchHandle = React.useRef();
     const [searchResultsInner, setSearchResultsInner] = React.useState([]);
     const searchResults = searchResultsIn ?? searchResultsInner;
-    const cancelSearch = React.useCallback(() => {
-        if (searchHandle.current !== undefined) {
-            window.cancelAnimationFrame(searchHandle.current);
-            searchHandle.current = undefined;
-        }
-        // Always abort and replace the controller to ensure a fresh, non-aborted signal
-        if (abortControllerRef.current !== undefined) {
-            abortControllerRef.current.abort();
-        }
-        abortControllerRef.current = new AbortController();
-    }, []);
+    const [cancelSearch] = React.useState(() => makeCancelSearch(searchHandle, abortControllerRef));
     const cellYOffsetRef = React.useRef(cellYOffset);
     cellYOffsetRef.current = cellYOffset;
-    const beginSearch = React.useCallback((str) => {
+    const beginSearch = (str) => {
         const regex = new RegExp(str.replace(/([$()*+.?[\\\]^{|}-])/g, "\\$1"), "i");
         let startY = cellYOffsetRef.current;
         // Lets assume we can do 10 rows at a time
@@ -145,16 +157,16 @@ const DataGridSearch = p => {
         };
         cancelSearch();
         searchHandle.current = window.requestAnimationFrame(tick);
-    }, [cancelSearch, columns.length, getCellsForSelection, onSearchResultsChanged, rows]);
-    const onClose = React.useCallback(() => {
+    };
+    const onClose = useStableCallback(() => {
         onSearchClose?.();
         setSearchStatus(undefined);
         setSearchResultsInner([]);
         onSearchResultsChanged?.([], -1);
         cancelSearch();
         canvasRef?.current?.focus();
-    }, [cancelSearch, canvasRef, onSearchClose, onSearchResultsChanged]);
-    const onSearchChange = React.useCallback((event) => {
+    });
+    const onSearchChange = useStableCallback((event) => {
         setSearchString(event.target.value);
         if (searchResultsIn !== undefined)
             return;
@@ -166,7 +178,7 @@ const DataGridSearch = p => {
         else {
             beginSearch(event.target.value);
         }
-    }, [beginSearch, cancelSearch, setSearchString, searchResultsIn]);
+    });
     React.useEffect(() => {
         if (searchInputRef.current === null)
             return;
@@ -187,7 +199,7 @@ const DataGridSearch = p => {
         // Only re-run when showSearch changes:
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [showSearch, searchInputRef]);
-    const onNext = React.useCallback((ev) => {
+    const onNext = useStableCallback((ev) => {
         ev?.stopPropagation?.();
         if (searchStatus === undefined || searchStatus.results === 0)
             return;
@@ -197,8 +209,8 @@ const DataGridSearch = p => {
             selectedIndex: newIndex,
         });
         onSearchResultsChanged?.(searchResults, newIndex);
-    }, [searchStatus, onSearchResultsChanged, searchResults]);
-    const onPrev = React.useCallback((ev) => {
+    });
+    const onPrev = useStableCallback((ev) => {
         ev?.stopPropagation?.();
         if (searchStatus === undefined || searchStatus.results === 0)
             return;
@@ -210,8 +222,8 @@ const DataGridSearch = p => {
             selectedIndex: newIndex,
         });
         onSearchResultsChanged?.(searchResults, newIndex);
-    }, [onSearchResultsChanged, searchResults, searchStatus]);
-    const onSearchKeyDown = React.useCallback((event) => {
+    });
+    const onSearchKeyDown = useStableCallback((event) => {
         if (((event.ctrlKey || event.metaKey) && event.nativeEvent.code === "KeyF") || event.key === "Escape") {
             onClose();
             event.stopPropagation();
@@ -225,21 +237,16 @@ const DataGridSearch = p => {
                 onNext();
             }
         }
-    }, [onClose, onNext, onPrev]);
+    });
     // cancel search if the component is unmounted
-    React.useEffect(() => {
-        return () => {
-            cancelSearch();
-        };
-    }, [cancelSearch]);
+    React.useEffect(() => cancelSearch, [cancelSearch]);
     const [isAnimatingOut, setIsAnimatingOut] = React.useState(false);
     React.useEffect(() => {
         if (showSearch) {
             setIsAnimatingOut(true);
         }
         else {
-            const timeoutId = setTimeout(() => setIsAnimatingOut(false), 150);
-            return () => clearTimeout(timeoutId);
+            return clearAnimatingOutLater(setIsAnimatingOut);
         }
     }, [showSearch]);
     const searchbox = React.useMemo(() => {
@@ -256,9 +263,6 @@ const DataGridSearch = p => {
                 resultString = `${searchStatus.selectedIndex + 1} of ${resultString}`;
             }
         }
-        const cancelEvent = (ev) => {
-            ev.stopPropagation();
-        };
         const rowsSearchedProgress = rows > 0 ? Math.floor(((searchStatus?.rowsSearched ?? 0) / rows) * 100) : 0;
         const progressStyle = {
             width: `${rowsSearchedProgress}%`,

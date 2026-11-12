@@ -11,6 +11,7 @@ import { AnimationManager } from "./animation-manager.js";
 import { RenderStateProvider, packColRowToNumber } from "../../common/render-state-provider.js";
 import { browserIsFirefox, browserIsSafari } from "../../common/browser-detect.js";
 import { useAnimationQueue } from "./use-animation-queue.js";
+import { useLatest, useStableCallback } from "../../common/use-stable-callback.js";
 import { assert } from "../../common/support.js";
 import { OutOfBoundsRegionAxis, outOfBoundsKind, groupHeaderKind, headerKind, mouseEventArgsAreEqual, } from "./event-args.js";
 import { pointInRect } from "../../common/math.js";
@@ -22,6 +23,151 @@ const getRowData = (cell, getCellRenderer) => {
     const r = getCellRenderer?.(cell);
     return r?.getAccessibilityString(cell) ?? "";
 };
+// The functions below are module level so that what they return holds its arguments and nothing from a render of
+// DataGrid. A function created in the render body keeps that whole render alive for as long as it is referenced.
+function noop() {
+    // do nothing
+}
+const defaultGetGroupDetails = name => ({ name });
+function makeFullRedraw(lastArgsRef, lastDrawRef) {
+    return () => {
+        lastArgsRef.current = undefined;
+        lastDrawRef.current();
+    };
+}
+function attachBuffers(bufferACtx, bufferBCtx) {
+    if (bufferACtx === null || bufferBCtx === null)
+        return undefined;
+    document.documentElement.append(bufferACtx.canvas);
+    document.documentElement.append(bufferBCtx.canvas);
+    return () => {
+        bufferACtx.canvas.remove();
+        bufferBCtx.canvas.remove();
+    };
+}
+function makeDraw(inputs, refs) {
+    const { canvasRef, overlayRef, canvasCtx, overlayCtx, lastArgsRef, damageRegion, hoverValues, hoverInfoRef, enqueueRef, setDrawCursorOverride, } = refs;
+    return () => {
+        const canvas = canvasRef.current;
+        const overlay = overlayRef.current;
+        if (canvas === null || overlay === null)
+            return;
+        if (canvasCtx.current === null) {
+            canvasCtx.current = canvas.getContext("2d", { alpha: false });
+            canvas.width = 0;
+            canvas.height = 0;
+        }
+        if (overlayCtx.current === null) {
+            overlayCtx.current = overlay.getContext("2d", { alpha: false });
+            overlay.width = 0;
+            overlay.height = 0;
+        }
+        if (canvasCtx.current === null || overlayCtx.current === null || inputs === undefined) {
+            return;
+        }
+        let didOverride = false;
+        const overrideCursor = (cursor) => {
+            didOverride = true;
+            setDrawCursorOverride(cursor);
+        };
+        const last = lastArgsRef.current;
+        const current = {
+            ...inputs,
+            headerCanvasCtx: overlayCtx.current,
+            canvasCtx: canvasCtx.current,
+            overrideCursor,
+            damage: damageRegion.current,
+            hoverValues: hoverValues.current,
+            hoverInfo: hoverInfoRef.current,
+            enqueue: enqueueRef.current,
+        };
+        // This confusing bit of code due to some poor design. Long story short, the damage property is only used
+        // with what is effectively the "last args" for the last normal draw anyway. We don't want the drawing code
+        // to look at this and go "shit dawg, nothing changed" so we force it to draw frash, but the damage restricts
+        // the draw anyway.
+        //
+        // Dear future Jason, I'm sorry. It was expedient, it worked, and had almost zero perf overhead. THe universe
+        // basically made me do it. What choice did I have?
+        if (current.damage === undefined) {
+            lastArgsRef.current = current;
+            drawGrid(current, last);
+        }
+        else {
+            drawGrid(current, undefined);
+        }
+        // don't reset on damage events
+        if (!didOverride && (current.damage === undefined || current.damage.has(hoverInfoRef?.current?.[0]))) {
+            setDrawCursorOverride(undefined);
+        }
+    };
+}
+function makeDamageInternal(damageRegion, lastDrawRef) {
+    return locations => {
+        damageRegion.current = locations;
+        lastDrawRef.current();
+        damageRegion.current = undefined;
+    };
+}
+function makeOnAnimationFrame(damageRegion, hoverValues, lastDrawRef) {
+    return values => {
+        damageRegion.current = new CellSet(values.map(x => x.item));
+        hoverValues.current = values;
+        lastDrawRef.current();
+        damageRegion.current = undefined;
+    };
+}
+function makeCanvasRef(ref, canvasRef, windowEventTargetRef, eventTarget) {
+    return instance => {
+        ref.current = instance;
+        if (canvasRef !== undefined) {
+            canvasRef.current = instance;
+        }
+        if (eventTarget) {
+            windowEventTargetRef.current = eventTarget;
+        }
+        else if (instance === null) {
+            windowEventTargetRef.current = window;
+        }
+        else {
+            const docRoot = instance.getRootNode();
+            if (docRoot === document)
+                windowEventTargetRef.current = window;
+            windowEventTargetRef.current = docRoot;
+        }
+    };
+}
+function makeFocusElement(ref, canvasRef, selectionRef, focusRef) {
+    return el => {
+        // We don't want to steal the focus if we don't currently own the focus.
+        if (ref.current === null || !ref.current.contains(document.activeElement))
+            return;
+        if (el === null && selectionRef.current.current !== undefined) {
+            canvasRef?.current?.focus({
+                preventScroll: true,
+            });
+        }
+        else if (el !== null) {
+            el.focus({
+                preventScroll: true,
+            });
+        }
+        focusRef.current = el;
+    };
+}
+function forwardDataGridRef(latest) {
+    return {
+        focus: () => latest.current.focus(),
+        getBounds: (col, row) => latest.current.getBounds(col, row),
+        damage: cells => latest.current.damage(cells),
+        getMouseArgsForPosition: (posX, posY, ev) => latest.current.getMouseArgsForPosition(posX, posY, ev),
+    };
+}
+function bindClick(handler, value) {
+    return () => handler(value);
+}
+function bindFocus(handler, value) {
+    return e => handler(e.target, value);
+}
 const DataGrid = (p, forwardedRef) => {
     const { width, height, accessibilityHeight, columns, cellXOffset: cellXOffsetReal, cellYOffset, headerHeight, fillHandle = false, groupHeaderHeight, rowHeight, rows, getCellContent, getRowThemeOverride, onHeaderMenuClick, onHeaderIndicatorClick, enableGroups, isFilling, onCanvasFocused, onCanvasBlur, isFocused, selection, freezeColumns, onContextMenu, freezeTrailingRows, fixedShadowX = true, fixedShadowY = true, drawFocusRing, onMouseDown, onMouseUp, onMouseMoveRaw, onMouseMove, onItemHovered, dragAndDropState, firstColAccessible, onKeyDown, onKeyUp, highlightRegions, canvasRef, onDragStart, onDragEnd, eventTargetRef, isResizing, resizeColumn: resizeCol, isDragging, isDraggable = false, allowResize, disabledRows, hasAppendRow, getGroupDetails, theme, prelightCells, headerIcons, verticalBorder, drawCell: drawCellCallback, drawHeader: drawHeaderCallback, onCellFocused, onDragOverCell, onDrop, onDragLeave, imageWindowLoader, smoothScrollX = false, smoothScrollY = false, experimental, getCellRenderer, resizeIndicator = "full", } = p;
     const translateX = p.translateX ?? 0;
@@ -42,10 +188,10 @@ const DataGrid = (p, forwardedRef) => {
     const [lastWasTouch, setLastWasTouch] = React.useState(false);
     const lastWasTouchRef = React.useRef(lastWasTouch);
     lastWasTouchRef.current = lastWasTouch;
-    const spriteManager = React.useMemo(() => new SpriteManager(headerIcons, () => {
-        lastArgsRef.current = undefined;
-        lastDrawRef.current();
-    }), [headerIcons]);
+    const lastArgsRef = React.useRef();
+    // Holds the draw function of the last layout pass.
+    const lastDrawRef = React.useRef(noop);
+    const spriteManager = React.useMemo(() => new SpriteManager(headerIcons, makeFullRedraw(lastArgsRef, lastDrawRef)), [headerIcons]);
     const totalHeaderHeight = enableGroups ? groupHeaderHeight + headerHeight : headerHeight;
     const scrollingStopRef = React.useRef(-1);
     const enableFirefoxRescaling = (experimental?.enableFirefoxRescaling ?? false) && browserIsFirefox.value;
@@ -66,7 +212,7 @@ const DataGrid = (p, forwardedRef) => {
     const mappedColumns = useMappedColumns(columns, freezeColumns);
     const stickyX = React.useMemo(() => (fixedShadowX ? getStickyWidth(mappedColumns, dragAndDropState) : 0), [mappedColumns, dragAndDropState, fixedShadowX]);
     // row: -1 === columnHeader, -2 === groupHeader
-    const getBoundsForItem = React.useCallback((canvas, col, row) => {
+    const getBoundsForItem = (canvas, col, row) => {
         const rect = canvas.getBoundingClientRect();
         if (col >= mappedColumns.length || row >= rows) {
             return undefined;
@@ -82,22 +228,8 @@ const DataGrid = (p, forwardedRef) => {
         result.x += rect.x;
         result.y += rect.y;
         return result;
-    }, [
-        width,
-        height,
-        groupHeaderHeight,
-        totalHeaderHeight,
-        cellXOffset,
-        cellYOffset,
-        translateX,
-        translateY,
-        rows,
-        freezeColumns,
-        freezeTrailingRows,
-        mappedColumns,
-        rowHeight,
-    ]);
-    const getMouseArgsForPosition = React.useCallback((canvas, posX, posY, ev) => {
+    };
+    const getMouseArgsForPosition = (canvas, posX, posY, ev) => {
         const rect = canvas.getBoundingClientRect();
         const scale = rect.width / width;
         const x = (posX - rect.left) / scale;
@@ -210,9 +342,7 @@ const DataGrid = (p, forwardedRef) => {
             let isFillHandle = false;
             const drawFill = fillHandle !== false && fillHandle !== undefined;
             if (drawFill && selection.current !== undefined) {
-                const fill = typeof fillHandle === "object"
-                    ? { ...DEFAULT_FILL_HANDLE, ...fillHandle }
-                    : DEFAULT_FILL_HANDLE;
+                const fill = typeof fillHandle === "object" ? { ...DEFAULT_FILL_HANDLE, ...fillHandle } : DEFAULT_FILL_HANDLE;
                 const fillHandleClickSize = fill.size;
                 const half = fillHandleClickSize / 2;
                 const fillHandleLocation = rectBottomRight(selection.current.range);
@@ -246,25 +376,7 @@ const DataGrid = (p, forwardedRef) => {
             };
         }
         return result;
-    }, [
-        width,
-        mappedColumns,
-        cellXOffset,
-        translateX,
-        height,
-        enableGroups,
-        headerHeight,
-        groupHeaderHeight,
-        rows,
-        rowHeight,
-        cellYOffset,
-        translateY,
-        freezeTrailingRows,
-        getBoundsForItem,
-        fillHandle,
-        selection,
-        totalHeaderHeight,
-    ]);
+    };
     const [hoveredItem] = hoveredItemInfo ?? [];
     const enqueueRef = React.useRef(() => {
         // do nothing
@@ -282,49 +394,16 @@ const DataGrid = (p, forwardedRef) => {
         b.style["position"] = "fixed";
         return [a.getContext("2d", { alpha: false }), b.getContext("2d", { alpha: false })];
     }, []);
-    React.useLayoutEffect(() => {
-        if (bufferACtx === null || bufferBCtx === null)
-            return;
-        document.documentElement.append(bufferACtx.canvas);
-        document.documentElement.append(bufferBCtx.canvas);
-        return () => {
-            bufferACtx.canvas.remove();
-            bufferBCtx.canvas.remove();
-        };
-    }, [bufferACtx, bufferBCtx]);
+    React.useLayoutEffect(() => attachBuffers(bufferACtx, bufferBCtx), [bufferACtx, bufferBCtx]);
     const renderStateProvider = React.useMemo(() => new RenderStateProvider(), []);
     const maxDPR = enableFirefoxRescaling && scrolling ? 1 : enableSafariRescaling && scrolling ? 2 : 5;
     const minimumCellWidth = experimental?.disableMinimumCellWidth === true ? 1 : 10;
-    const lastArgsRef = React.useRef();
     const canvasCtx = React.useRef(null);
     const overlayCtx = React.useRef(null);
-    const draw = React.useCallback(() => {
-        const canvas = ref.current;
-        const overlay = overlayRef.current;
-        if (canvas === null || overlay === null)
-            return;
-        if (canvasCtx.current === null) {
-            canvasCtx.current = canvas.getContext("2d", { alpha: false });
-            canvas.width = 0;
-            canvas.height = 0;
-        }
-        if (overlayCtx.current === null) {
-            overlayCtx.current = overlay.getContext("2d", { alpha: false });
-            overlay.width = 0;
-            overlay.height = 0;
-        }
-        if (canvasCtx.current === null || overlayCtx.current === null || bufferACtx === null || bufferBCtx === null) {
-            return;
-        }
-        let didOverride = false;
-        const overrideCursor = (cursor) => {
-            didOverride = true;
-            setDrawCursorOverride(cursor);
-        };
-        const last = lastArgsRef.current;
-        const current = {
-            headerCanvasCtx: overlayCtx.current,
-            canvasCtx: canvasCtx.current,
+    // Everything a draw reads that comes from props or state. A new object means the canvas must be redrawn.
+    const drawInputs = React.useMemo(() => bufferACtx === null || bufferBCtx === null
+        ? undefined
+        : {
             bufferACtx,
             bufferBCtx,
             width,
@@ -350,52 +429,28 @@ const DataGrid = (p, forwardedRef) => {
             fillHandle,
             drawCellCallback,
             hasAppendRow,
-            overrideCursor,
             maxScaleFactor: maxDPR,
             freezeTrailingRows,
             rows,
             drawFocus: drawFocusRing,
             getCellContent,
-            getGroupDetails: getGroupDetails ?? (name => ({ name })),
+            getGroupDetails: getGroupDetails ?? defaultGetGroupDetails,
             getRowThemeOverride,
             drawHeaderCallback,
             prelightCells,
             highlightRegions,
             imageLoader,
             lastBlitData,
-            damage: damageRegion.current,
-            hoverValues: hoverValues.current,
-            hoverInfo: hoverInfoRef.current,
             spriteManager,
             scrolling,
             hyperWrapping: experimental?.hyperWrapping ?? false,
             touchMode: lastWasTouch,
-            enqueue: enqueueRef.current,
             renderStateProvider,
             renderStrategy: experimental?.renderStrategy ?? (browserIsSafari.value ? "double-buffer" : "single-buffer"),
             getCellRenderer,
             minimumCellWidth,
             resizeIndicator,
-        };
-        // This confusing bit of code due to some poor design. Long story short, the damage property is only used
-        // with what is effectively the "last args" for the last normal draw anyway. We don't want the drawing code
-        // to look at this and go "shit dawg, nothing changed" so we force it to draw frash, but the damage restricts
-        // the draw anyway.
-        //
-        // Dear future Jason, I'm sorry. It was expedient, it worked, and had almost zero perf overhead. THe universe
-        // basically made me do it. What choice did I have?
-        if (current.damage === undefined) {
-            lastArgsRef.current = current;
-            drawGrid(current, last);
-        }
-        else {
-            drawGrid(current, undefined);
-        }
-        // don't reset on damage events
-        if (!didOverride && (current.damage === undefined || current.damage.has(hoverInfoRef?.current?.[0]))) {
-            setDrawCursorOverride(undefined);
-        }
-    }, [
+        }, [
         bufferACtx,
         bufferBCtx,
         width,
@@ -442,7 +497,18 @@ const DataGrid = (p, forwardedRef) => {
         minimumCellWidth,
         resizeIndicator,
     ]);
-    const lastDrawRef = React.useRef(draw);
+    const draw = React.useMemo(() => makeDraw(drawInputs, {
+        canvasRef: ref,
+        overlayRef,
+        canvasCtx,
+        overlayCtx,
+        lastArgsRef,
+        damageRegion,
+        hoverValues,
+        hoverInfoRef,
+        enqueueRef,
+        setDrawCursorOverride,
+    }), [drawInputs]);
     React.useLayoutEffect(() => {
         draw();
         lastDrawRef.current = draw;
@@ -457,16 +523,12 @@ const DataGrid = (p, forwardedRef) => {
         };
         void fn();
     }, []);
-    const damageInternal = React.useCallback((locations) => {
-        damageRegion.current = locations;
-        lastDrawRef.current();
-        damageRegion.current = undefined;
-    }, []);
+    const [damageInternal] = React.useState(() => makeDamageInternal(damageRegion, lastDrawRef));
     const enqueue = useAnimationQueue(damageInternal);
     enqueueRef.current = enqueue;
-    const damage = React.useCallback((cells) => {
+    const damage = (cells) => {
         damageInternal(new CellSet(cells.map(x => x.cell)));
-    }, [damageInternal]);
+    };
     imageLoader.setCallback(damageInternal);
     const [overFill, setOverFill] = React.useState(false);
     const [hCol, hRow] = hoveredItem ?? [];
@@ -512,7 +574,7 @@ const DataGrid = (p, forwardedRef) => {
         // because we have an event target we need to set its cursor instead.
         target.style.cursor = lastSetCursor.current = style.cursor;
     }
-    const groupHeaderActionForEvent = React.useCallback((group, bounds, localEventX, localEventY) => {
+    const groupHeaderActionForEvent = (group, bounds, localEventX, localEventY) => {
         if (getGroupDetails === undefined)
             return undefined;
         const groupDesc = getGroupDetails(group);
@@ -525,8 +587,8 @@ const DataGrid = (p, forwardedRef) => {
             }
         }
         return undefined;
-    }, [getGroupDetails]);
-    const isOverHeaderElement = React.useCallback((canvas, col, clientX, clientY) => {
+    };
+    const isOverHeaderElement = (canvas, col, clientX, clientY) => {
         const header = mappedColumns[col];
         if (!isDragging && !isResizing && !(hoveredOnEdge ?? false)) {
             const headerBounds = getBoundsForItem(canvas, col, -1);
@@ -550,11 +612,11 @@ const DataGrid = (p, forwardedRef) => {
             }
         }
         return undefined;
-    }, [mappedColumns, getBoundsForItem, hoveredOnEdge, isDragging, isResizing, theme]);
+    };
     const downTime = React.useRef(0);
     const downPosition = React.useRef();
     const mouseDown = React.useRef(false);
-    const onMouseDownImpl = React.useCallback((ev) => {
+    const onMouseDownImpl = (ev) => {
         const canvas = ref.current;
         const eventTarget = eventTargetRef?.current;
         if (canvas === null || (ev.target !== canvas && ev.target !== eventTarget))
@@ -583,8 +645,7 @@ const DataGrid = (p, forwardedRef) => {
         if (lastWasTouchRef.current !== args.isTouch) {
             setLastWasTouch(args.isTouch);
         }
-        if (args.kind === headerKind &&
-            isOverHeaderElement(canvas, args.location[0], clientX, clientY) !== undefined) {
+        if (args.kind === headerKind && isOverHeaderElement(canvas, args.location[0], clientX, clientY) !== undefined) {
             return;
         }
         else if (args.kind === groupHeaderKind) {
@@ -602,18 +663,11 @@ const DataGrid = (p, forwardedRef) => {
             // preventing default in touch events stops scroll
             ev.preventDefault();
         }
-    }, [
-        eventTargetRef,
-        isDraggable,
-        getMouseArgsForPosition,
-        groupHeaderActionForEvent,
-        isOverHeaderElement,
-        onMouseDown,
-    ]);
+    };
     useEventListener("touchstart", onMouseDownImpl, windowEventTarget, false);
     useEventListener("mousedown", onMouseDownImpl, windowEventTarget, false);
     const lastUpTime = React.useRef(0);
-    const onMouseUpImpl = React.useCallback((ev) => {
+    const onMouseUpImpl = (ev) => {
         const lastUpTimeValue = lastUpTime.current;
         lastUpTime.current = Date.now();
         const canvas = ref.current;
@@ -675,10 +729,10 @@ const DataGrid = (p, forwardedRef) => {
             }
         }
         onMouseUp(args, isOutside);
-    }, [onMouseUp, eventTargetRef, getMouseArgsForPosition, isOverHeaderElement, groupHeaderActionForEvent]);
+    };
     useEventListener("mouseup", onMouseUpImpl, windowEventTarget, false);
     useEventListener("touchend", onMouseUpImpl, windowEventTarget, false);
-    const onClickImpl = React.useCallback((ev) => {
+    const onClickImpl = (ev) => {
         const canvas = ref.current;
         if (canvas === null)
             return;
@@ -718,9 +772,9 @@ const DataGrid = (p, forwardedRef) => {
                 }
             }
         }
-    }, [eventTargetRef, getMouseArgsForPosition, isOverHeaderElement, onHeaderMenuClick, onHeaderIndicatorClick]);
+    };
     useEventListener("click", onClickImpl, windowEventTarget, false);
-    const onContextMenuImpl = React.useCallback((ev) => {
+    const onContextMenuImpl = (ev) => {
         const canvas = ref.current;
         const eventTarget = eventTargetRef?.current;
         if (canvas === null || (ev.target !== canvas && ev.target !== eventTarget) || onContextMenu === undefined)
@@ -730,15 +784,9 @@ const DataGrid = (p, forwardedRef) => {
             if (ev.cancelable)
                 ev.preventDefault();
         });
-    }, [eventTargetRef, getMouseArgsForPosition, onContextMenu]);
+    };
     useEventListener("contextmenu", onContextMenuImpl, eventTargetRef?.current ?? null, false);
-    const onAnimationFrame = React.useCallback(values => {
-        damageRegion.current = new CellSet(values.map(x => x.item));
-        hoverValues.current = values;
-        lastDrawRef.current();
-        damageRegion.current = undefined;
-    }, []);
-    const animManagerValue = React.useMemo(() => new AnimationManager(onAnimationFrame), [onAnimationFrame]);
+    const animManagerValue = React.useMemo(() => new AnimationManager(makeOnAnimationFrame(damageRegion, hoverValues, lastDrawRef)), []);
     const animationManager = React.useRef(animManagerValue);
     animationManager.current = animManagerValue;
     React.useLayoutEffect(() => {
@@ -754,7 +802,7 @@ const DataGrid = (p, forwardedRef) => {
         am.setHovered(cellNeedsHover ? hoveredItem : undefined);
     }, [getCellContent, getCellRenderer, hoveredItem]);
     const hoveredRef = React.useRef();
-    const onMouseMoveImpl = React.useCallback((ev) => {
+    const onMouseMoveImpl = (ev) => {
         const canvas = ref.current;
         if (canvas === null)
             return;
@@ -768,6 +816,7 @@ const DataGrid = (p, forwardedRef) => {
         }
         // the point here is not to trigger re-renders every time the mouse moves over a cell
         // that doesn't care about the mouse positon.
+        // eslint-disable-next-line unicorn/consistent-function-scoping
         const maybeSetHoveredInfo = (newVal, needPosition) => {
             setHoveredItemInfo(cv => {
                 if (cv === newVal)
@@ -812,20 +861,9 @@ const DataGrid = (p, forwardedRef) => {
         setOverFill(args.kind === "cell" && args.isFillHandle);
         onMouseMoveRaw?.(ev);
         onMouseMove(args);
-    }, [
-        eventTargetRef,
-        getMouseArgsForPosition,
-        firstColAccessible,
-        allowResize,
-        onMouseMoveRaw,
-        onMouseMove,
-        onItemHovered,
-        getCellContent,
-        getCellRenderer,
-        damageInternal,
-    ]);
+    };
     useEventListener("mousemove", onMouseMoveImpl, windowEventTarget, true);
-    const onKeyDownImpl = React.useCallback((event) => {
+    const onKeyDownImpl = useStableCallback((event) => {
         const canvas = ref.current;
         if (canvas === null)
             return;
@@ -849,8 +887,8 @@ const DataGrid = (p, forwardedRef) => {
             rawEvent: event,
             location,
         });
-    }, [onKeyDown, selection, getBoundsForItem]);
-    const onKeyUpImpl = React.useCallback((event) => {
+    });
+    const onKeyUpImpl = useStableCallback((event) => {
         const canvas = ref.current;
         if (canvas === null)
             return;
@@ -874,26 +912,10 @@ const DataGrid = (p, forwardedRef) => {
             rawEvent: event,
             location,
         });
-    }, [onKeyUp, selection, getBoundsForItem]);
-    const refImpl = React.useCallback((instance) => {
-        ref.current = instance;
-        if (canvasRef !== undefined) {
-            canvasRef.current = instance;
-        }
-        if (experimental?.eventTarget) {
-            windowEventTargetRef.current = experimental.eventTarget;
-        }
-        else if (instance === null) {
-            windowEventTargetRef.current = window;
-        }
-        else {
-            const docRoot = instance.getRootNode();
-            if (docRoot === document)
-                windowEventTargetRef.current = window;
-            windowEventTargetRef.current = docRoot;
-        }
-    }, [canvasRef, experimental?.eventTarget]);
-    const onDragStartImpl = React.useCallback((event) => {
+    });
+    const customEventTarget = experimental?.eventTarget;
+    const refImpl = React.useMemo(() => makeCanvasRef(ref, canvasRef, windowEventTargetRef, customEventTarget), [canvasRef, customEventTarget]);
+    const onDragStartImpl = (event) => {
         const canvas = ref.current;
         if (canvas === null || isDraggable === false || isResizing) {
             event.preventDefault();
@@ -973,24 +995,10 @@ const DataGrid = (p, forwardedRef) => {
         else {
             event.preventDefault();
         }
-    }, [
-        isDraggable,
-        isResizing,
-        getMouseArgsForPosition,
-        onDragStart,
-        getBoundsForItem,
-        theme,
-        mappedColumns,
-        spriteManager,
-        drawHeaderCallback,
-        getCellContent,
-        imageLoader,
-        renderStateProvider,
-        getCellRenderer,
-    ]);
+    };
     useEventListener("dragstart", onDragStartImpl, eventTargetRef?.current ?? null, false, false);
     const activeDropTarget = React.useRef();
-    const onDragOverImpl = React.useCallback((event) => {
+    const onDragOverImpl = (event) => {
         const canvas = ref.current;
         if (onDrop !== undefined) {
             // Need to preventDefault to allow drop
@@ -1007,14 +1015,14 @@ const DataGrid = (p, forwardedRef) => {
             activeDropTarget.current = [col, row];
             onDragOverCell([col, row], event.dataTransfer);
         }
-    }, [firstColAccessible, getMouseArgsForPosition, onDragOverCell, onDrop]);
+    };
     useEventListener("dragover", onDragOverImpl, eventTargetRef?.current ?? null, false, false);
-    const onDragEndImpl = React.useCallback(() => {
+    const onDragEndImpl = () => {
         activeDropTarget.current = undefined;
         onDragEnd?.();
-    }, [onDragEnd]);
+    };
     useEventListener("dragend", onDragEndImpl, eventTargetRef?.current ?? null, false, false);
-    const onDropImpl = React.useCallback((event) => {
+    const onDropImpl = (event) => {
         const canvas = ref.current;
         if (canvas === null || onDrop === undefined) {
             return;
@@ -1025,32 +1033,17 @@ const DataGrid = (p, forwardedRef) => {
         const [rawCol, row] = args.location;
         const col = rawCol - (firstColAccessible ? 0 : 1);
         onDrop([col, row], event.dataTransfer);
-    }, [firstColAccessible, getMouseArgsForPosition, onDrop]);
+    };
     useEventListener("drop", onDropImpl, eventTargetRef?.current ?? null, false, false);
-    const onDragLeaveImpl = React.useCallback(() => {
+    const onDragLeaveImpl = () => {
         onDragLeave?.();
-    }, [onDragLeave]);
+    };
     useEventListener("dragleave", onDragLeaveImpl, eventTargetRef?.current ?? null, false, false);
     const selectionRef = React.useRef(selection);
     selectionRef.current = selection;
     const focusRef = React.useRef(null);
-    const focusElement = React.useCallback((el) => {
-        // We don't want to steal the focus if we don't currently own the focus.
-        if (ref.current === null || !ref.current.contains(document.activeElement))
-            return;
-        if (el === null && selectionRef.current.current !== undefined) {
-            canvasRef?.current?.focus({
-                preventScroll: true,
-            });
-        }
-        else if (el !== null) {
-            el.focus({
-                preventScroll: true,
-            });
-        }
-        focusRef.current = el;
-    }, [canvasRef]);
-    React.useImperativeHandle(forwardedRef, () => ({
+    const focusElement = React.useMemo(() => makeFocusElement(ref, canvasRef, selectionRef, focusRef), [canvasRef]);
+    const handle = {
         focus: () => {
             const el = focusRef.current;
             // The element in the ref may have been removed however our callback method ref
@@ -1081,8 +1074,43 @@ const DataGrid = (p, forwardedRef) => {
             }
             return getMouseArgsForPosition(canvasRef.current, posX, posY, ev);
         },
-    }), [canvasRef, damage, getBoundsForItem, getMouseArgsForPosition]);
+    };
+    // The forwarded handle keeps one identity and calls into the latest render.
+    const latestHandle = useLatest(handle);
+    React.useImperativeHandle(forwardedRef, () => forwardDataGridRef(latestHandle), [latestHandle]);
     const lastFocusedSubdomNode = React.useRef();
+    // The accessibility tree is kept between renders, so its handlers are bound to these instead of to a render.
+    const onAccessibleHeaderFocus = useStableCallback((focusTarget, col) => {
+        if (focusTarget === focusRef.current)
+            return;
+        onCellFocused?.([col, -1]);
+    });
+    const onAccessibleCellClick = useStableCallback((location) => {
+        const canvas = canvasRef?.current;
+        if (canvas === null || canvas === undefined)
+            return;
+        onKeyDown?.({
+            bounds: getBoundsForItem(canvas, location[0], location[1]),
+            cancel: () => undefined,
+            preventDefault: () => undefined,
+            stopPropagation: () => undefined,
+            ctrlKey: false,
+            key: "Enter",
+            keyCode: 13,
+            metaKey: false,
+            shiftKey: false,
+            altKey: false,
+            rawEvent: undefined,
+            location,
+        });
+    });
+    const onAccessibleCellFocus = useStableCallback((focusTarget, location) => {
+        if (focusTarget === focusRef.current ||
+            (lastFocusedSubdomNode.current?.[0] === location[0] && lastFocusedSubdomNode.current?.[1] === location[1]))
+            return;
+        lastFocusedSubdomNode.current = location;
+        onCellFocused?.(location);
+    });
     const accessibilityTree = useDebouncedMemo(() => {
         if (width < 50 || experimental?.disableAccessibilityTree === true)
             return null;
@@ -1104,11 +1132,7 @@ const DataGrid = (p, forwardedRef) => {
         }
         return (React.createElement("table", { key: "access-tree", role: "grid", "aria-rowcount": rows + 1, "aria-multiselectable": "true", "aria-colcount": mappedColumns.length + colOffset },
             React.createElement("thead", { role: "rowgroup" },
-                React.createElement("tr", { role: "row", "aria-rowindex": 1 }, effectiveCols.map(c => (React.createElement("th", { role: "columnheader", "aria-selected": selection.columns.hasIndex(c.sourceIndex), "aria-colindex": c.sourceIndex + 1 + colOffset, tabIndex: -1, onFocus: e => {
-                        if (e.target === focusRef.current)
-                            return;
-                        return onCellFocused?.([c.sourceIndex, -1]);
-                    }, key: c.sourceIndex }, c.title))))),
+                React.createElement("tr", { role: "row", "aria-rowindex": 1 }, effectiveCols.map(c => (React.createElement("th", { role: "columnheader", "aria-selected": selection.columns.hasIndex(c.sourceIndex), "aria-colindex": c.sourceIndex + 1 + colOffset, tabIndex: -1, onFocus: bindFocus(onAccessibleHeaderFocus, c.sourceIndex), key: c.sourceIndex }, c.title))))),
             React.createElement("tbody", { role: "rowgroup" }, visibleRows.map(row => (React.createElement("tr", { role: "row", "aria-selected": selection.rows.hasIndex(row), key: row, "aria-rowindex": row + 2 }, effectiveCols.map(c => {
                 const col = c.sourceIndex;
                 const key = packColRowToNumber(col, row);
@@ -1121,32 +1145,7 @@ const DataGrid = (p, forwardedRef) => {
                 const id = `glide-cell-${col}-${row}`;
                 const location = [col, row];
                 const cellContent = getCellContent(location, true);
-                return (React.createElement("td", { key: key, role: "gridcell", "aria-colindex": col + 1 + colOffset, "aria-selected": selected, "aria-readonly": isInnerOnlyCell(cellContent) || !isReadWriteCell(cellContent), id: id, "data-testid": id, onClick: () => {
-                        const canvas = canvasRef?.current;
-                        if (canvas === null || canvas === undefined)
-                            return;
-                        return onKeyDown?.({
-                            bounds: getBoundsForItem(canvas, col, row),
-                            cancel: () => undefined,
-                            preventDefault: () => undefined,
-                            stopPropagation: () => undefined,
-                            ctrlKey: false,
-                            key: "Enter",
-                            keyCode: 13,
-                            metaKey: false,
-                            shiftKey: false,
-                            altKey: false,
-                            rawEvent: undefined,
-                            location,
-                        });
-                    }, onFocusCapture: e => {
-                        if (e.target === focusRef.current ||
-                            (lastFocusedSubdomNode.current?.[0] === col &&
-                                lastFocusedSubdomNode.current?.[1] === row))
-                            return;
-                        lastFocusedSubdomNode.current = location;
-                        return onCellFocused?.(location);
-                    }, ref: focused ? focusElement : undefined, tabIndex: -1 }, getRowData(cellContent, getCellRenderer)));
+                return (React.createElement("td", { key: key, role: "gridcell", "aria-colindex": col + 1 + colOffset, "aria-selected": selected, "aria-readonly": isInnerOnlyCell(cellContent) || !isReadWriteCell(cellContent), id: id, "data-testid": id, onClick: bindClick(onAccessibleCellClick, location), onFocusCapture: bindFocus(onAccessibleCellFocus, location), ref: focused ? focusElement : undefined, tabIndex: -1 }, getRowData(cellContent, getCellRenderer)));
             })))))));
     }, [
         width,
@@ -1160,10 +1159,9 @@ const DataGrid = (p, forwardedRef) => {
         selection,
         focusElement,
         getCellContent,
-        canvasRef,
-        onKeyDown,
-        getBoundsForItem,
-        onCellFocused,
+        onAccessibleHeaderFocus,
+        onAccessibleCellClick,
+        onAccessibleCellFocus,
     ], 200);
     const opacityX = freezeColumns === 0 || !fixedShadowX ? 0 : cellXOffset > freezeColumns ? 1 : clamp(-translateX / 100, 0, 1);
     const absoluteOffsetY = -cellYOffset * 32 + translateY;

@@ -1,5 +1,9 @@
 import React from "react";
 import { getDataEditorTheme } from "../common/styles.js";
+// Module level so that the returned function holds its arguments and nothing from a render.
+function scaleRowHeight(rowHeight, scaler) {
+    return n => Math.ceil(rowHeight(n) * scaler);
+}
 export function useRemAdjuster({ rowHeight: rowHeightIn, headerHeight: headerHeightIn, groupHeaderHeight: groupHeaderHeightIn, theme: themeIn, overscrollX: overscrollXIn, overscrollY: overscrollYIn, scaleToRem, remSize, }) {
     const [rowHeight, headerHeight, groupHeaderHeight, theme, overscrollX, overscrollY] = React.useMemo(() => {
         if (!scaleToRem || remSize === 16)
@@ -8,7 +12,7 @@ export function useRemAdjuster({ rowHeight: rowHeightIn, headerHeight: headerHei
         const rh = rowHeightIn;
         const bt = getDataEditorTheme();
         return [
-            typeof rh === "number" ? rh * scaler : (n) => Math.ceil(rh(n) * scaler),
+            typeof rh === "number" ? rh * scaler : scaleRowHeight(rh, scaler),
             Math.ceil(headerHeightIn * scaler),
             Math.ceil(groupHeaderHeightIn * scaler),
             {

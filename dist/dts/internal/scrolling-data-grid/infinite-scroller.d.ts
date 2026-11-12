@@ -21,6 +21,7 @@ interface Props {
     readonly update: (region: Rectangle & {
         paddingRight: number;
     }) => void;
+    readonly onScrollProcessed?: (scrollLeft: number, scrollTop: number) => void;
 }
 /**
  * InfiniteScroller provides virtual scrolling capabilities for the data grid.
@@ -35,3 +36,4 @@ interface Props {
  */
 export declare const InfiniteScroller: React.FC<Props>;
 export {};
+//# sourceMappingURL=infinite-scroller.d.ts.map
